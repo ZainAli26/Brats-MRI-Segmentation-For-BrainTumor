@@ -1,0 +1,102 @@
+# =============================================================================
+# BraTS 2024 — .gitignore
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# DATASET — 35 GB of NIfTI MRI files. Never commit raw data to git.
+# Restore by downloading the BraTS 2024 GLI dataset from Synapse.
+# -----------------------------------------------------------------------------
+training_data1_v2/
+*.nii
+*.nii.gz
+*.mgz
+*.mgh
+
+
+# -----------------------------------------------------------------------------
+# GENERATED OUTPUTS — all files in output/ are fully reproducible by running
+# the agent scripts.  PNGs and CSVs can be large and change every run.
+# Exception: track output/.gitkeep so the empty directory exists on clone.
+# -----------------------------------------------------------------------------
+brats-data-analysis/output/*
+!brats-data-analysis/output/.gitkeep
+
+
+# -----------------------------------------------------------------------------
+# PYTHON VIRTUAL ENVIRONMENT — 357 MB, machine-specific.
+# Recreate with: python3.12 -m venv .venv && pip install -r requirements.txt
+# -----------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+
+# -----------------------------------------------------------------------------
+# PYTHON BYTECODE & CACHES
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+
+# -----------------------------------------------------------------------------
+# PYTHON PACKAGING ARTIFACTS (if the project is ever packaged)
+# -----------------------------------------------------------------------------
+*.egg-info/
+dist/
+build/
+*.egg
+MANIFEST
+pip-wheel-metadata/
+.eggs/
+
+
+# -----------------------------------------------------------------------------
+# CLAUDE CODE — session state, plans, and memory are local-only
+# -----------------------------------------------------------------------------
+.claude/
+
+
+# -----------------------------------------------------------------------------
+# MACOS SYSTEM FILES
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+
+
+# -----------------------------------------------------------------------------
+# EDITORS & IDEs
+# -----------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.ropeproject/
+
+
+# -----------------------------------------------------------------------------
+# JUPYTER (if notebooks are added later)
+# -----------------------------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+
+# -----------------------------------------------------------------------------
+# LOGS & TEMP FILES
+# -----------------------------------------------------------------------------
+*.log
+*.tmp
+*.bak
+*.orig
