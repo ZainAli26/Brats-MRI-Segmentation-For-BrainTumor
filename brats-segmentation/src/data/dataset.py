@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from monai.data import CacheDataset, DataLoader
+from monai.data import CacheDataset, PersistentDataset, Dataset, DataLoader
 
 
 def build_file_list(
@@ -59,9 +59,18 @@ def get_dataloaders(
     val_transform,
     batch_size: int = 2,
     num_workers: int = 4,
-    cache_rate: float = 0.5,
+    cache_dir: str = None,
 ) -> Dict[str, DataLoader]:
-    """Create train/val/test DataLoaders with caching.
+    """Create train/val/test DataLoaders.
+
+    Uses PersistentDataset (disk cache) when cache_dir is set, otherwise
+    plain Dataset with no RAM caching. This avoids OOM on large datasets
+    like BraTS with 1000+ cases.
+
+    Args:
+        cache_dir: If provided, use PersistentDataset to cache transformed
+                   data to disk. First epoch is slow, subsequent epochs are fast.
+                   If None, no caching (each sample is loaded + transformed on the fly).
 
     Returns:
         Dict with keys "train", "val", "test" -> DataLoader
@@ -70,15 +79,33 @@ def get_dataloaders(
     val_files = build_file_list(val_cases, modalities, include_label=True)
     test_files = build_file_list(test_cases, modalities, include_label=True)
 
-    train_ds = CacheDataset(train_files, transform=train_transform, cache_rate=cache_rate, num_workers=num_workers)
-    val_ds = CacheDataset(val_files, transform=val_transform, cache_rate=1.0, num_workers=num_workers)
-    test_ds = CacheDataset(test_files, transform=val_transform, cache_rate=1.0, num_workers=num_workers)
+    if cache_dir:
+        cache_path = Path(cache_dir).expanduser()
+        train_cache = cache_path / "train"
+        val_cache = cache_path / "val"
+        test_cache = cache_path / "test"
+        for d in [train_cache, val_cache, test_cache]:
+            d.mkdir(parents=True, exist_ok=True)
 
+        train_ds = PersistentDataset(train_files, transform=train_transform, cache_dir=str(train_cache))
+        val_ds = PersistentDataset(val_files, transform=val_transform, cache_dir=str(val_cache))
+        test_ds = PersistentDataset(test_files, transform=val_transform, cache_dir=str(test_cache))
+    else:
+        train_ds = Dataset(train_files, transform=train_transform)
+        val_ds = Dataset(val_files, transform=val_transform)
+        test_ds = Dataset(test_files, transform=val_transform)
+
+    # persistent_workers keeps worker processes alive between epochs,
+    # preventing fork deadlocks in Docker containers
+    use_persistent = num_workers > 0
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=True)
+                              num_workers=num_workers, pin_memory=True,
+                              persistent_workers=use_persistent)
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False,
-                            num_workers=num_workers, pin_memory=True)
+                            num_workers=num_workers, pin_memory=True,
+                            persistent_workers=use_persistent)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False,
-                             num_workers=num_workers, pin_memory=True)
+                             num_workers=num_workers, pin_memory=True,
+                             persistent_workers=use_persistent)
 
     return {"train": train_loader, "val": val_loader, "test": test_loader}

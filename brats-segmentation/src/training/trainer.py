@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 
 from src.training.losses import DeepSupervisionLoss
+from src.utils import inference_wrapper
 from src.utils.experiment import ExperimentTracker
 
 console = Console()
@@ -89,6 +90,7 @@ class Trainer:
         self.best_val_dice = 0.0
         self.patience_counter = 0
         self.patience = train_cfg["early_stopping_patience"]
+        self.start_epoch = 1
 
     def train(self):
         """Run full training loop."""
@@ -97,9 +99,11 @@ class Trainer:
         val_interval = train_cfg["val_interval"]
 
         console.print(f"\n[bold cyan]Starting training for {epochs} epochs on {self.device}[/bold cyan]")
+        if self.start_epoch > 1:
+            console.print(f"[bold yellow]Resuming from epoch {self.start_epoch} (best dice: {self.best_val_dice:.4f})[/bold yellow]")
         console.print(f"[dim]AMP: {self.use_amp} | Val every {val_interval} epochs | Patience: {self.patience}[/dim]\n")
 
-        for epoch in range(1, epochs + 1):
+        for epoch in range(self.start_epoch, epochs + 1):
             # Train one epoch
             train_loss = self._train_epoch(epoch)
             self.scheduler.step()
@@ -197,7 +201,7 @@ class Trainer:
                 with autocast(enabled=self.use_amp):
                     outputs = sliding_window_inference(
                         images, self.spatial_size, self.sw_batch_size,
-                        self.model, overlap=self.sw_overlap
+                        inference_wrapper(self.model), overlap=self.sw_overlap
                     )
 
                 # Post-process
@@ -255,8 +259,19 @@ class Trainer:
         torch.save(ckpt, path)
 
     def load_checkpoint(self, path: str):
-        """Load a saved checkpoint."""
-        ckpt = torch.load(path, map_location=self.device)
+        """Load a saved checkpoint and restore full training state."""
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(ckpt["model_state_dict"])
-        console.print(f"[green]Loaded checkpoint from {path} (epoch {ckpt['epoch']}, dice {ckpt['val_dice']:.4f})[/green]")
+
+        # Restore optimizer, scheduler, and training state for proper resume
+        if "optimizer_state_dict" in ckpt:
+            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if "val_dice" in ckpt:
+            self.best_val_dice = ckpt["val_dice"]
+        if "epoch" in ckpt:
+            self.start_epoch = ckpt["epoch"] + 1
+
+        console.print(f"[green]Resumed from {path} — epoch {ckpt['epoch']}, best dice {ckpt.get('val_dice', 0):.4f}[/green]")
         return ckpt

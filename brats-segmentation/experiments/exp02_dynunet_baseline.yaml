@@ -1,0 +1,68 @@
+# Exp 1.2 — DynUNet baseline on BraTS 2024
+# Question: Baseline performance of SegResNet (BraTS challenge winner arch)
+
+data:
+  dataset: "brats2024"
+  train_dir: "../Brats2024/training_data1_v2"
+  val_dir: "../Brats2024/validation_data"
+  modalities: ["t1c", "t1n", "t2f", "t2w"]
+  num_classes: 4
+  label_map: {0: 0, 1: 1, 2: 2, 4: 3}
+  inverse_label_map: {0: 0, 1: 1, 2: 2, 3: 4}
+  split_ratios: [0.75, 0.15, 0.10]
+  split_seed: 42
+
+preprocessing:
+  spatial_size: [128, 128, 128]
+  norm_method: "zscore_nonzero"
+  augmentation:
+    random_flip_prob: 0.5
+    random_rotate_prob: 0.3
+    random_rotate_range: 0.5236
+    random_intensity_shift: 0.1
+    random_intensity_scale: 0.1
+
+model:
+  name: "dynunet"
+  in_channels: 4
+  out_channels: 4
+  dynunet:
+    kernel_sizes: [[3,3,3], [3,3,3], [3,3,3], [3,3,3], [3,3,3]]
+    strides: [[1,1,1], [2,2,2], [2,2,2], [2,2,2], [2,2,2]]
+    filters: [32, 64, 128, 256, 512]
+    deep_supervision: true
+    deep_supervision_heads: 3
+
+training:
+  epochs: 300
+  batch_size: 1
+  num_workers: 2
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  optimizer: "adamw"
+  scheduler: "cosine_warm_restarts"
+  scheduler_params: {T_0: 50, T_mult: 2, eta_min: 0.000001}
+  amp: true
+  grad_accum_steps: 2     # effective batch size = 2
+  val_interval: 5
+  early_stopping_patience: 30
+  loss: "dice_ce"
+  dice_weight: 1.0
+  ce_weight: 1.0
+  sw_batch_size: 2
+  sw_overlap: 0.5
+
+evaluation:
+  metrics: ["dice", "hausdorff95"]
+  regions:
+    ET: [3]
+    TC: [1, 3]
+    WT: [1, 2, 3]
+  failure_dice_threshold: 0.5
+  small_tumor_volume_threshold: 500
+  num_failure_cases: 10
+
+experiment:
+  output_dir: "./runs"
+  save_best_only: true
+  log_interval: 10

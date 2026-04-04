@@ -24,6 +24,7 @@ data:
 
   split_ratios: [0.75, 0.15, 0.10]
   split_seed: 42
+  # cache_dir: ".cache/data_brats2023"
 
 preprocessing:
   spatial_size: [128, 128, 128]
@@ -73,7 +74,7 @@ model:
 training:
   epochs: 300
   batch_size: 2
-  num_workers: 4
+  num_workers: 2
   learning_rate: 0.0001
   weight_decay: 0.00001
   optimizer: "adamw"

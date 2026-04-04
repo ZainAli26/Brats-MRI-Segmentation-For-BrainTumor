@@ -1,0 +1,12 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+runs/
+nnunet_data/
+output/
+.git/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/

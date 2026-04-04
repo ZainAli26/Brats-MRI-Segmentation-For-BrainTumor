@@ -380,3 +380,230 @@ tensorboard --logdir runs/
 
 If running on a 12 GB GPU, use `--batch_size 1` for SwinUNETR and nnU-Net v2.
 Use `grad_accum_steps: 2` in config to compensate for smaller batch size.
+
+## Docker
+
+### Build
+
+```bash
+cd brats-segmentation
+docker build -t brats-seg .
+```
+
+### Install docker-compose (if not already installed)
+
+```bash
+sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+    -o /usr/local/bin/docker-compose && sudo chmod +x /usr/local/bin/docker-compose
+```
+
+### Docker Compose (Recommended)
+
+The simplest way to run experiments. All GPU, volume, and path configuration
+is handled automatically by `docker-compose.yml`.
+
+```bash
+# Build the image
+docker-compose build
+
+# --- Run experiments one at a time ---
+docker-compose run --rm exp01          # Phase 1: SegResNet baseline
+docker-compose run --rm exp02          # Phase 1: DynUNet baseline
+docker-compose run --rm exp03          # Phase 1: nnU-Net v2 baseline
+docker-compose run --rm exp04          # Phase 1: SwinUNETR baseline
+docker-compose run --rm exp05          # Phase 2: DiceCE loss
+docker-compose run --rm exp06          # Phase 2: DiceFocal loss
+docker-compose run --rm exp07          # Phase 3: Crop 96^3
+docker-compose run --rm exp08          # Phase 3: Crop 160^3
+docker-compose run --rm exp09          # Phase 4: nnU-Net v2 plain
+docker-compose run --rm exp10          # Phase 4: nnU-Net v2 residual
+docker-compose run --rm native         # Phase 5: Native nnU-Net v2
+docker-compose run --rm exp11          # Phase 6: BraTS 2023
+docker-compose run --rm exp12          # Phase 7: Train 2024 → test 2023
+docker-compose run --rm exp13          # Phase 7: Train 2023 → test 2024
+
+# --- Evaluate & compare ---
+docker-compose run --rm eval                                          # Evaluate latest run
+docker-compose run --rm -e RUN_NAME=segresnet_20260329_120000 eval-run  # Evaluate specific run
+docker-compose run --rm compare                                       # Compare all runs
+
+# --- TensorBoard ---
+docker-compose up tensorboard          # Open http://localhost:6006
+
+# --- Interactive shell ---
+docker-compose run --rm shell
+```
+
+### Data Mount Convention (for docker run)
+
+If you prefer plain `docker run` over compose, set these once per session:
+
+```bash
+export BRATS_ROOT=/home/zain/workspace/repos/Brats-MRI-Segmentation-For-BrainTumor
+export BRATS_SEG=$BRATS_ROOT/brats-segmentation
+```
+
+### Run a Single Experiment
+
+```bash
+# Phase 1 — Baseline models
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_ROOT/Brats2023:/data/Brats2023:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp01_segresnet_baseline.yaml \
+        --data_dir /data/Brats2024/training_data1_v2
+```
+
+Replace `exp01` with any experiment config (exp01–exp13). For BraTS 2023
+experiments (exp11, exp13), use `--data_dir /data/Brats2023/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData`.
+
+### All Experiment Commands
+
+```bash
+# --- Phase 1: Baselines ---
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp01_segresnet_baseline.yaml \
+        --data_dir /data/Brats2024/training_data1_v2
+
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp02_dynunet_baseline.yaml \
+        --data_dir /data/Brats2024/training_data1_v2
+
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp03_nnunet_v2_baseline.yaml \
+        --data_dir /data/Brats2024/training_data1_v2
+
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp04_swin_unetr_baseline.yaml \
+        --data_dir /data/Brats2024/training_data1_v2
+
+# --- Phase 2: Loss functions ---
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp05_dice_ce.yaml \
+        --data_dir /data/Brats2024/training_data1_v2
+
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp06_dice_focal.yaml \
+        --data_dir /data/Brats2024/training_data1_v2
+
+# --- Phase 3: Resolution ---
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp07_crop96.yaml \
+        --data_dir /data/Brats2024/training_data1_v2
+
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp08_crop160.yaml \
+        --data_dir /data/Brats2024/training_data1_v2
+
+# --- Phase 4: nnU-Net v2 variants ---
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp09_nnunet_v2_plain.yaml \
+        --data_dir /data/Brats2024/training_data1_v2
+
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp10_nnunet_v2_residual.yaml \
+        --data_dir /data/Brats2024/training_data1_v2
+
+# --- Phase 5: Native nnU-Net v2 ---
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    -v $BRATS_SEG/nnunet_data:/app/nnunet_data \
+    -e nnUNet_raw=/app/nnunet_data/nnUNet_raw \
+    -e nnUNet_preprocessed=/app/nnunet_data/nnUNet_preprocessed \
+    -e nnUNet_results=/app/nnunet_data/nnUNet_results \
+    brats-seg bash nnunet_native/run_nnunet.sh \
+        --data_dir /data/Brats2024/training_data1_v2 --gpu 0
+
+# --- Phase 6: BraTS 2023 ---
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2023:/data/Brats2023:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp11_brats2023_best.yaml \
+        --data_dir /data/Brats2023/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
+
+# --- Phase 7: Cross-dataset ---
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp12_train2024_test2023.yaml \
+        --data_dir /data/Brats2024/training_data1_v2
+
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2023:/data/Brats2023:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python train.py \
+        --config experiments/exp13_train2023_test2024.yaml \
+        --data_dir /data/Brats2023/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
+```
+
+### Evaluate Inside Docker
+
+```bash
+# Evaluate the latest run
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python evaluate.py \
+        --run_dir runs/<run_name> --visualize_failures
+
+# Compare all runs
+docker run --rm --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg python analyze_failures.py \
+        --run_dirs runs/*/ --compare
+```
+
+### TensorBoard
+
+```bash
+docker run --rm -p 6006:6006 \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg tensorboard --logdir runs --host 0.0.0.0 --port 6006
+# Open http://localhost:6006
+```
+
+### Interactive Shell
+
+```bash
+docker run --rm -it --gpus all --shm-size=8g \
+    -v $BRATS_ROOT/Brats2024:/data/Brats2024:ro \
+    -v $BRATS_ROOT/Brats2023:/data/Brats2023:ro \
+    -v $BRATS_SEG/runs:/app/runs \
+    brats-seg bash
+```

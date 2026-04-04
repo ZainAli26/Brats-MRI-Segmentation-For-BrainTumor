@@ -1,0 +1,203 @@
+# ==============================================================================
+# BraTS Segmentation — Docker Compose
+#
+# Install docker-compose:
+#   sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+#       -o /usr/local/bin/docker-compose && sudo chmod +x /usr/local/bin/docker-compose
+#
+# Usage:
+#   docker-compose run --rm exp01          # Run single experiment
+#   docker-compose run --rm eval           # Evaluate latest run
+#   docker-compose up tensorboard          # View training curves at localhost:6006
+#   docker-compose run --rm compare        # Compare all runs
+#   docker-compose run --rm native         # Native nnU-Net v2 pipeline
+#   docker-compose run --rm shell          # Interactive shell
+# ==============================================================================
+
+x-gpu-common: &gpu-common
+  image: brats-seg
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+  volumes:
+    - ../Brats2024:/data/Brats2024:ro
+    - ../Brats2023:/data/Brats2023:ro
+    - ./runs:/app/runs
+    - ./.cache:/app/.cache
+    - ./nnunet_data:/app/nnunet_data
+  working_dir: /app
+  shm_size: "8g"
+
+services:
+  # ====================================================================
+  # Phase 1 — Baseline model comparison (BraTS 2024)
+  # ====================================================================
+  exp01:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp01_segresnet_baseline.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  exp02:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp02_dynunet_baseline.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  exp03:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp03_nnunet_v2_baseline.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  exp04:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp04_swin_unetr_baseline.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  # ====================================================================
+  # Phase 2 — Loss function study
+  # ====================================================================
+  exp05:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp05_dice_ce.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  exp06:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp06_dice_focal.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  # ====================================================================
+  # Phase 3 — Input resolution study
+  # ====================================================================
+  exp07:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp07_crop96.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  exp08:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp08_crop160.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  # ====================================================================
+  # Phase 4 — nnU-Net v2 architecture variants
+  # ====================================================================
+  exp09:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp09_nnunet_v2_plain.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  exp10:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp10_nnunet_v2_residual.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  # ====================================================================
+  # Phase 5 — Native nnU-Net v2 pipeline
+  # ====================================================================
+  native:
+    <<: *gpu-common
+    command: >
+      bash nnunet_native/run_nnunet.sh
+        --data_dir /data/Brats2024/training_data1_v2
+        --gpu 0
+    environment:
+      - nnUNet_raw=/app/nnunet_data/nnUNet_raw
+      - nnUNet_preprocessed=/app/nnunet_data/nnUNet_preprocessed
+      - nnUNet_results=/app/nnunet_data/nnUNet_results
+
+  # ====================================================================
+  # Phase 6 — BraTS 2023 best model
+  # ====================================================================
+  exp11:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp11_brats2023_best.yaml
+        --data_dir /data/Brats2023/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
+
+  # ====================================================================
+  # Phase 7 — Cross-dataset generalization
+  # ====================================================================
+  exp12:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp12_train2024_test2023.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  exp13:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp13_train2023_test2024.yaml
+        --data_dir /data/Brats2023/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
+
+  # ====================================================================
+  # Utilities
+  # ====================================================================
+
+  # Evaluate the most recent run
+  eval:
+    <<: *gpu-common
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        RUN_DIR=$$(ls -td runs/*/ 2>/dev/null | head -1)
+        if [ -z "$$RUN_DIR" ]; then echo "No runs found"; exit 1; fi
+        echo "Evaluating: $$RUN_DIR"
+        python evaluate.py --run_dir "$$RUN_DIR" --visualize_failures
+
+  # Evaluate a specific run (pass RUN_NAME env var)
+  eval-run:
+    <<: *gpu-common
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        if [ -z "$${RUN_NAME}" ]; then echo "Set RUN_NAME: docker-compose run --rm -e RUN_NAME=segresnet_20260329_120000 eval-run"; exit 1; fi
+        python evaluate.py --run_dir "runs/$${RUN_NAME}" --visualize_failures
+
+  # Compare all completed runs
+  compare:
+    <<: *gpu-common
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        python analyze_failures.py --run_dirs runs/*/ --compare
+
+  # TensorBoard — view at http://localhost:6006
+  tensorboard:
+    <<: *gpu-common
+    command: ["tensorboard", "--logdir", "runs", "--host", "0.0.0.0", "--port", "6006"]
+    ports:
+      - "6006:6006"
+
+  # Interactive shell
+  shell:
+    <<: *gpu-common
+    entrypoint: ["bash"]
+    stdin_open: true
+    tty: true

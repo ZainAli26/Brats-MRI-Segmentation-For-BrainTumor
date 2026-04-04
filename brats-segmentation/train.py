@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--epochs", type=int, help="Override number of epochs")
     parser.add_argument("--batch_size", type=int, help="Override batch size")
     parser.add_argument("--lr", type=float, help="Override learning rate")
+    parser.add_argument("--data_dir", type=str, help="Override data.train_dir in config")
     parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from")
     args = parser.parse_args()
 
@@ -49,6 +50,8 @@ def main():
         config["training"]["batch_size"] = args.batch_size
     if args.lr:
         config["training"]["learning_rate"] = args.lr
+    if args.data_dir:
+        config["data"]["train_dir"] = args.data_dir
 
     # Banner
     console.print(Panel.fit(
@@ -88,7 +91,11 @@ def main():
     val_transform = get_val_transforms(spatial_size, modalities, label_map)
 
     # Create dataloaders
-    console.print("[bold]Creating dataloaders...[/bold]")
+    cache_dir = config.get("data", {}).get("cache_dir", None)
+    if cache_dir:
+        console.print(f"[bold]Creating dataloaders with disk cache: {cache_dir}[/bold]")
+    else:
+        console.print("[bold]Creating dataloaders (no caching — each sample loaded on the fly)...[/bold]")
     dataloaders = get_dataloaders(
         train_cases, val_cases, test_cases,
         modalities=modalities,
@@ -96,6 +103,7 @@ def main():
         val_transform=val_transform,
         batch_size=config["training"]["batch_size"],
         num_workers=config["training"]["num_workers"],
+        cache_dir=cache_dir,
     )
     console.print(f"  Train: {len(dataloaders['train'].dataset)} samples")
     console.print(f"  Val:   {len(dataloaders['val'].dataset)} samples")

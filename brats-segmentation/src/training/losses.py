@@ -49,6 +49,18 @@ class DeepSupervisionLoss(nn.Module):
         self.weights = weights
 
     def forward(self, predictions, target):
+        # Handle different deep supervision output formats:
+        #   - MONAI DynUNet: stacked tensor [B, heads, C, H, W, D]
+        #   - nnU-Net v2:    list/tuple of tensors [B, C, H, W, D]
+        #   - No deep sup:   single tensor [B, C, H, W, D]
+
+        if isinstance(predictions, torch.Tensor) and predictions.ndim == target.ndim + 1:
+            # DynUNet stacked format: [B, heads, C, H, W, D] -> list of [B, C, H, W, D]
+            predictions = [predictions[:, i] for i in range(predictions.shape[1])]
+        elif isinstance(predictions, torch.Tensor) and predictions.ndim == target.ndim:
+            # No deep supervision — single tensor
+            return self.base_loss(predictions, target)
+
         if not isinstance(predictions, (list, tuple)):
             return self.base_loss(predictions, target)
 
@@ -60,7 +72,7 @@ class DeepSupervisionLoss(nn.Module):
 
         total_loss = 0
         for i, pred in enumerate(predictions):
-            if pred.shape != target.shape:
+            if pred.shape[2:] != target.shape[2:]:
                 # Deep supervision outputs may be at lower resolution
                 from torch.nn.functional import interpolate
                 pred = interpolate(pred, size=target.shape[2:], mode="trilinear", align_corners=False)

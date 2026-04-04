@@ -21,6 +21,7 @@ from matplotlib.patches import Patch
 import seaborn as sns
 import torch
 from monai.inferers import sliding_window_inference
+from src.utils import inference_wrapper
 from monai.transforms import AsDiscrete
 from torch.cuda.amp import autocast
 from rich.console import Console
@@ -188,7 +189,7 @@ def visualize_failure_grid(
 
             with autocast(enabled=config["training"]["amp"] and device.type == "cuda"):
                 outputs = sliding_window_inference(
-                    images, spatial_size, sw_batch, model, overlap=0.5
+                    images, spatial_size, sw_batch, inference_wrapper(model), overlap=0.5
                 )
 
             pred = post_pred(outputs[0]).cpu().numpy()

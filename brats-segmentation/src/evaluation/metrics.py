@@ -8,6 +8,7 @@ import pandas as pd
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.transforms import AsDiscrete
 from monai.inferers import sliding_window_inference
+from src.utils import inference_wrapper
 from monai.data import decollate_batch
 from torch.cuda.amp import autocast
 from tqdm import tqdm
@@ -57,7 +58,7 @@ def compute_case_metrics(
 
             with autocast(enabled=use_amp):
                 outputs = sliding_window_inference(
-                    images, spatial_size, sw_batch, model, overlap=sw_overlap
+                    images, spatial_size, sw_batch, inference_wrapper(model), overlap=sw_overlap
                 )
 
             outputs_list = decollate_batch(outputs)

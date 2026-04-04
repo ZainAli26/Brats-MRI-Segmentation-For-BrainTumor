@@ -20,6 +20,11 @@ data:
   split_ratios: [0.75, 0.15, 0.10]  # train / val / test
   split_seed: 42
 
+  # Disk cache for transformed data (avoids RAM OOM on large datasets).
+  # Set to a path to enable PersistentDataset; null/omit to disable.
+  # First epoch is slow (caching), subsequent epochs load from disk.
+  # cache_dir: ".cache/data"  # Uncomment to enable disk caching (PersistentDataset)
+
 preprocessing:
   spatial_size: [128, 128, 128]
   # Intensity normalization: per-channel z-score on nonzero voxels
@@ -80,7 +85,7 @@ model:
 training:
   epochs: 300
   batch_size: 2
-  num_workers: 4
+  num_workers: 2
   learning_rate: 0.0001
   weight_decay: 0.00001
   optimizer: "adamw"
