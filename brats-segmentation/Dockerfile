@@ -37,7 +37,7 @@ COPY src/ src/
 COPY configs/ configs/
 COPY experiments/ experiments/
 COPY nnunet_native/ nnunet_native/
-COPY train.py evaluate.py analyze_failures.py ./
+COPY train.py train_kfold.py evaluate.py analyze_failures.py ./
 
 # Create output directories
 RUN mkdir -p runs output

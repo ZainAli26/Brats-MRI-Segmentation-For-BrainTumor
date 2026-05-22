@@ -1,5 +1,5 @@
-# Exp 1.4 — SwinUNETR baseline on BraTS 2024
-# Question: Baseline performance of SegResNet (BraTS challenge winner arch)
+# Exp 18 — nnU-Net v2 ResidualEncoderUNet with 5-Fold CV and 128×160×128 patch
+# Question: Does the residual encoder (47.1M) outperform plain (31.2M) with full data?
 
 data:
   dataset: "brats2024"
@@ -9,11 +9,11 @@ data:
   num_classes: 4
   label_map: {0: 0, 1: 1, 2: 2, 4: 3}
   inverse_label_map: {0: 0, 1: 1, 2: 2, 3: 4}
-  split_ratios: [0.75, 0.15, 0.10]
   split_seed: 42
+  n_folds: 5
 
 preprocessing:
-  spatial_size: [96, 96, 96]
+  spatial_size: [160, 192, 128]
   norm_method: "zscore_nonzero"
   augmentation:
     random_flip_prob: 0.5
@@ -23,15 +23,17 @@ preprocessing:
     random_intensity_scale: 0.1
 
 model:
-  name: "swin_unetr"
+  name: "nnunet_v2"
   in_channels: 4
   out_channels: 4
-  swin_unetr:
-    feature_size: 48
-    depths: [2, 2, 2, 2]
-    num_heads: [3, 6, 12, 24]
-    drop_rate: 0.0
-    attn_drop_rate: 0.0
+  nnunet_v2:
+    variant: "residual"
+    kernel_sizes: [[3,3,3], [3,3,3], [3,3,3], [3,3,3], [3,3,3], [3,3,3]]
+    strides: [[1,1,1], [2,2,2], [2,2,2], [2,2,2], [2,2,2], [2,2,2]]
+    features_per_stage: [32, 64, 128, 256, 320, 320]
+    n_blocks_encoder: 2
+    n_blocks_decoder: 2
+    deep_supervision: true
 
 training:
   epochs: 300
@@ -43,13 +45,13 @@ training:
   scheduler: "cosine_warm_restarts"
   scheduler_params: {T_0: 50, T_mult: 2, eta_min: 0.000001}
   amp: true
-  grad_accum_steps: 2     # effective batch size = 2
+  grad_accum_steps: 2
   val_interval: 5
   early_stopping_patience: 30
   loss: "dice_ce"
   dice_weight: 1.0
   ce_weight: 1.0
-  sw_batch_size: 1
+  sw_batch_size: 2
   sw_overlap: 0.5
 
 evaluation:

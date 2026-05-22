@@ -90,3 +90,67 @@ def create_patient_splits(
     assert set(val_pids).isdisjoint(set(test_pids)), "Val/test patient overlap!"
 
     return sorted(train_cases), sorted(val_cases), sorted(test_cases)
+
+
+def create_kfold_splits(
+    data_dir: str,
+    n_folds: int = 5,
+    seed: int = 42,
+) -> List[Tuple[List[Path], List[Path]]]:
+    """Create K-fold cross-validation splits at patient level.
+
+    Uses ALL data for training/validation (no held-out test set).
+    Each fold's validation set contains ~1/K of patients.
+
+    Returns:
+        List of (train_cases, val_cases) tuples, one per fold.
+    """
+    data_path = Path(data_dir).expanduser()
+    case_dirs = sorted([
+        d for d in data_path.iterdir()
+        if d.is_dir() and not d.name.startswith(".") and CASE_PATTERN.match(d.name)
+    ])
+
+    patient_cases = group_by_patient(case_dirs)
+    patient_ids = sorted(patient_cases.keys())
+
+    rng = np.random.RandomState(seed)
+    rng.shuffle(patient_ids)
+
+    # Split patients into K folds
+    fold_size = len(patient_ids) // n_folds
+    folds = []
+
+    for fold_idx in range(n_folds):
+        start = fold_idx * fold_size
+        if fold_idx == n_folds - 1:
+            val_pids = patient_ids[start:]  # Last fold gets remainder
+        else:
+            val_pids = patient_ids[start:start + fold_size]
+        train_pids = [p for p in patient_ids if p not in set(val_pids)]
+
+        train_cases = sorted([c for pid in train_pids for c in patient_cases[pid]])
+        val_cases = sorted([c for pid in val_pids for c in patient_cases[pid]])
+
+        # Verify no overlap
+        train_pid_set = set(extract_patient_id(c.name) for c in train_cases)
+        val_pid_set = set(extract_patient_id(c.name) for c in val_cases)
+        assert train_pid_set.isdisjoint(val_pid_set), f"Fold {fold_idx}: patient overlap!"
+
+        folds.append((train_cases, val_cases))
+
+    # Print summary
+    table = Table(title=f"{n_folds}-Fold Cross-Validation (Patient-Level)", style="bold cyan")
+    table.add_column("Fold", style="bold")
+    table.add_column("Train Patients", justify="right")
+    table.add_column("Train Cases", justify="right")
+    table.add_column("Val Patients", justify="right")
+    table.add_column("Val Cases", justify="right")
+    for i, (tc, vc) in enumerate(folds):
+        tp = len(set(extract_patient_id(c.name) for c in tc))
+        vp = len(set(extract_patient_id(c.name) for c in vc))
+        table.add_row(f"Fold {i}", str(tp), str(len(tc)), str(vp), str(len(vc)))
+    table.add_row("Total", str(len(patient_ids)), str(len(case_dirs)), "", "")
+    console.print(table)
+
+    return folds

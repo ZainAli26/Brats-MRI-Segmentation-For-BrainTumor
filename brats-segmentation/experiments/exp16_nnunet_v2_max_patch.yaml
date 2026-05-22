@@ -1,5 +1,6 @@
-# Exp 1.4 — SwinUNETR baseline on BraTS 2024
-# Question: Baseline performance of SegResNet (BraTS challenge winner arch)
+# Exp 8.3 — nnU-Net v2 with max patch (160x192x128)
+# Question: Push nnU-Net v2 to the largest patch that fits 8 GB.
+# Matches original SegResNet paper size. ~7.5 GB estimated.
 
 data:
   dataset: "brats2024"
@@ -13,7 +14,7 @@ data:
   split_seed: 42
 
 preprocessing:
-  spatial_size: [96, 96, 96]
+  spatial_size: [160, 192, 128]
   norm_method: "zscore_nonzero"
   augmentation:
     random_flip_prob: 0.5
@@ -23,15 +24,17 @@ preprocessing:
     random_intensity_scale: 0.1
 
 model:
-  name: "swin_unetr"
+  name: "nnunet_v2"
   in_channels: 4
   out_channels: 4
-  swin_unetr:
-    feature_size: 48
-    depths: [2, 2, 2, 2]
-    num_heads: [3, 6, 12, 24]
-    drop_rate: 0.0
-    attn_drop_rate: 0.0
+  nnunet_v2:
+    variant: "plain"
+    kernel_sizes: [[3,3,3], [3,3,3], [3,3,3], [3,3,3], [3,3,3], [3,3,3]]
+    strides: [[1,1,1], [2,2,2], [2,2,2], [2,2,2], [2,2,2], [2,2,2]]
+    features_per_stage: [32, 64, 128, 256, 320, 320]
+    n_blocks_encoder: 2
+    n_blocks_decoder: 2
+    deep_supervision: true
 
 training:
   epochs: 300
@@ -43,7 +46,7 @@ training:
   scheduler: "cosine_warm_restarts"
   scheduler_params: {T_0: 50, T_mult: 2, eta_min: 0.000001}
   amp: true
-  grad_accum_steps: 2     # effective batch size = 2
+  grad_accum_steps: 2
   val_interval: 5
   early_stopping_patience: 30
   loss: "dice_ce"

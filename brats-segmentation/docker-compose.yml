@@ -99,6 +99,131 @@ services:
         --data_dir /data/Brats2024/training_data1_v2
 
   # ====================================================================
+  # Phase 3b — Large patch experiments (DynUNet & nnU-Net v2 use ~4 GB at 128^3)
+  # ====================================================================
+  exp14:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp14_dynunet_large_patch.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  exp15:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp15_nnunet_v2_large_patch.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  exp16:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/exp16_nnunet_v2_max_patch.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  # ====================================================================
+  # 5-Fold CV — nnU-Net v2 with 128×160×128 patch, all data
+  # ====================================================================
+  exp17:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp17_nnunet_v2_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  # Run a single fold (pass --fold 0..4)
+  exp17-fold0:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp17_nnunet_v2_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --fold 0
+
+  exp17-fold1:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp17_nnunet_v2_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --fold 1
+
+  exp17-fold2:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp17_nnunet_v2_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --fold 2
+
+  exp17-fold3:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp17_nnunet_v2_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --fold 3
+
+  exp17-fold4:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp17_nnunet_v2_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --fold 4
+
+  # ====================================================================
+  # 5-Fold CV — nnU-Net v2 ResidualEncoderUNet (47.1M)
+  # ====================================================================
+  exp18:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+
+  exp18-fold0:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --fold 0
+
+  exp18-fold1:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --fold 1
+
+  exp18-fold2:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --fold 2
+
+  exp18-fold3:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --fold 3
+
+  exp18-fold4:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --fold 4
+
+  # ====================================================================
   # Phase 4 — nnU-Net v2 architecture variants
   # ====================================================================
   exp09:

@@ -153,18 +153,20 @@ def main():
                     from monai.transforms import AsDiscrete
                     from torch.cuda.amp import autocast
 
+                    from src.utils import inference_wrapper
                     with autocast(enabled=config["training"]["amp"] and device.type == "cuda"):
                         outputs = sliding_window_inference(
                             images, spatial_size, config["training"]["sw_batch_size"],
-                            model, overlap=0.5
+                            inference_wrapper(model), overlap=0.5
                         )
                     pred = AsDiscrete(argmax=True)(outputs[0]).cpu().numpy()
 
                 image_np = images[0].cpu().numpy()
                 label_np = labels[0].cpu().numpy()
-                if label_np.ndim == 4:
+                # Squeeze to 3D (H, W, D) — remove channel/batch dims
+                while label_np.ndim > 3:
                     label_np = label_np[0]
-                if pred.ndim == 4:
+                while pred.ndim > 3:
                     pred = pred[0]
 
                 # Get metrics for this case

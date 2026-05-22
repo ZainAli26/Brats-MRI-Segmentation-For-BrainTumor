@@ -1,5 +1,6 @@
-# Exp 1.4 — SwinUNETR baseline on BraTS 2024
-# Question: Baseline performance of SegResNet (BraTS challenge winner arch)
+# Exp 8.1 — DynUNet with larger patch (160x192x128)
+# Question: How much does DynUNet improve with original-paper-sized patches?
+# At 128^3 it uses ~4 GB, so 160x192x128 (~7.5 GB) should fit the 8 GB RTX 3070.
 
 data:
   dataset: "brats2024"
@@ -13,7 +14,7 @@ data:
   split_seed: 42
 
 preprocessing:
-  spatial_size: [96, 96, 96]
+  spatial_size: [160, 192, 128]
   norm_method: "zscore_nonzero"
   augmentation:
     random_flip_prob: 0.5
@@ -23,15 +24,15 @@ preprocessing:
     random_intensity_scale: 0.1
 
 model:
-  name: "swin_unetr"
+  name: "dynunet"
   in_channels: 4
   out_channels: 4
-  swin_unetr:
-    feature_size: 48
-    depths: [2, 2, 2, 2]
-    num_heads: [3, 6, 12, 24]
-    drop_rate: 0.0
-    attn_drop_rate: 0.0
+  dynunet:
+    kernel_sizes: [[3,3,3], [3,3,3], [3,3,3], [3,3,3], [3,3,3]]
+    strides: [[1,1,1], [2,2,2], [2,2,2], [2,2,2], [2,2,2]]
+    filters: [32, 64, 128, 256, 512]
+    deep_supervision: true
+    deep_supervision_heads: 3
 
 training:
   epochs: 300
@@ -43,13 +44,13 @@ training:
   scheduler: "cosine_warm_restarts"
   scheduler_params: {T_0: 50, T_mult: 2, eta_min: 0.000001}
   amp: true
-  grad_accum_steps: 2     # effective batch size = 2
+  grad_accum_steps: 2
   val_interval: 5
   early_stopping_patience: 30
   loss: "dice_ce"
   dice_weight: 1.0
   ce_weight: 1.0
-  sw_batch_size: 1
+  sw_batch_size: 2
   sw_overlap: 0.5
 
 evaluation:

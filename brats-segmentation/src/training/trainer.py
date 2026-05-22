@@ -114,22 +114,34 @@ class Trainer:
             # Validate
             if epoch % val_interval == 0:
                 val_metrics = self._validate(epoch)
-                mean_dice = val_metrics["mean_dice"]
+                region_dice = val_metrics["region_dice"]
 
-                self.tracker.log_scalar("val/mean_dice", mean_dice, epoch)
-                for region, dice in val_metrics["region_dice"].items():
+                # Log all metrics
+                self.tracker.log_scalar("val/mean_class_dice", val_metrics["mean_dice"], epoch)
+                for region, dice in region_dice.items():
                     self.tracker.log_scalar(f"val/dice_{region}", dice, epoch)
 
-                # Checkpoint
-                if mean_dice > self.best_val_dice:
-                    self.best_val_dice = mean_dice
+                # Use mean region Dice (ET, TC, WT) as the primary metric
+                # This matches BraTS challenge reporting and paper conventions
+                mean_region_dice = sum(region_dice.values()) / len(region_dice)
+                self.tracker.log_scalar("val/mean_region_dice", mean_region_dice, epoch)
+
+                # Checkpoint based on mean region Dice
+                if mean_region_dice > self.best_val_dice:
+                    self.best_val_dice = mean_region_dice
                     self.patience_counter = 0
-                    self._save_checkpoint(epoch, mean_dice, is_best=True)
-                    console.print(f"  [green]New best: {mean_dice:.4f}[/green]")
+                    self._save_checkpoint(epoch, mean_region_dice, is_best=True,
+                                          region_dice=region_dice)
+                    console.print(
+                        f"  [green]New best mean region Dice: {mean_region_dice:.4f} "
+                        f"(ET={region_dice.get('ET',0):.4f} TC={region_dice.get('TC',0):.4f} "
+                        f"WT={region_dice.get('WT',0):.4f})[/green]"
+                    )
                 else:
                     self.patience_counter += 1
                     if not self.config["experiment"]["save_best_only"]:
-                        self._save_checkpoint(epoch, mean_dice, is_best=False)
+                        self._save_checkpoint(epoch, mean_region_dice, is_best=False,
+                                              region_dice=region_dice)
 
                 # Early stopping
                 if self.patience_counter >= self.patience:
@@ -234,15 +246,18 @@ class Trainer:
 
         region_dice = {r: region_dice_sums[r] / max(n_samples, 1) for r in regions}
 
+        mean_region_dice = sum(region_dice.values()) / len(region_dice)
         console.print(
             f"  [cyan]Val Epoch {epoch}[/cyan] | "
-            f"Mean Dice: {mean_dice:.4f} | "
+            f"Region Dice: {mean_region_dice:.4f} | "
             + " | ".join(f"{r}: {d:.4f}" for r, d in region_dice.items())
+            + f" | Class Dice: {mean_dice:.4f}"
         )
 
         return {"mean_dice": mean_dice, "region_dice": region_dice}
 
-    def _save_checkpoint(self, epoch: int, val_dice: float, is_best: bool):
+    def _save_checkpoint(self, epoch: int, val_dice: float, is_best: bool,
+                         region_dice: dict = None):
         """Save model checkpoint."""
         ckpt = {
             "epoch": epoch,
@@ -250,6 +265,7 @@ class Trainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "val_dice": val_dice,
+            "region_dice": region_dice or {},
             "config": self.config,
         }
         if is_best:

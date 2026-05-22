@@ -70,7 +70,11 @@ def main():
         sys.exit(1)
 
     # Initialize experiment tracker
-    tracker = ExperimentTracker(config, config_path=args.config)
+    # When resuming, write to the original run directory (derived from checkpoint path)
+    resume_dir = None
+    if args.resume:
+        resume_dir = str(Path(args.resume).expanduser().parent)
+    tracker = ExperimentTracker(config, config_path=args.config, resume_dir=resume_dir)
 
     # Patient-level splits
     console.print("\n[bold]Creating patient-level data splits...[/bold]")
@@ -127,13 +131,25 @@ def main():
     console.print()
     best_dice = trainer.train()
 
+    # Load region dice from best checkpoint for summary
+    best_ckpt_path = tracker.run_dir / "best_model.pth"
+    region_dice = {}
+    if best_ckpt_path.exists():
+        import torch
+        ckpt = torch.load(str(best_ckpt_path), map_location="cpu", weights_only=False)
+        region_dice = ckpt.get("region_dice", {})
+
     # Save final summary
     tracker.save_summary({
         "model": config["model"]["name"],
-        "best_val_dice": best_dice,
+        "best_mean_region_dice": best_dice,
+        "best_dice_ET": region_dice.get("ET", None),
+        "best_dice_TC": region_dice.get("TC", None),
+        "best_dice_WT": region_dice.get("WT", None),
         "epochs": config["training"]["epochs"],
         "batch_size": config["training"]["batch_size"],
         "learning_rate": config["training"]["learning_rate"],
+        "spatial_size": config["preprocessing"]["spatial_size"],
         "train_cases": len(train_cases),
         "val_cases": len(val_cases),
         "test_cases": len(test_cases),

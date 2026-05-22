@@ -1,4 +1,4 @@
-# Exp 3.2 — Crop 160^3 (more spatial context) on BraTS 2024
+# Exp 3.2 — Crop 160x192x128 (matches original paper sizes) on BraTS 2024
 # Question: Baseline performance of SegResNet (BraTS challenge winner arch)
 
 data:
@@ -13,7 +13,7 @@ data:
   split_seed: 42
 
 preprocessing:
-  spatial_size: [160, 160, 160]
+  spatial_size: [160, 192, 128]
   norm_method: "zscore_nonzero"
   augmentation:
     random_flip_prob: 0.5

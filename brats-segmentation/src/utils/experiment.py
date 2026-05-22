@@ -15,13 +15,18 @@ console = Console()
 class ExperimentTracker:
     """Manages experiment runs: directories, configs, TensorBoard, and result logs."""
 
-    def __init__(self, config: dict, config_path: str = None):
-        model_name = config["model"]["name"]
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_name = f"{model_name}_{timestamp}"
+    def __init__(self, config: dict, config_path: str = None, resume_dir: str = None):
+        if resume_dir:
+            # Resume into an existing run directory
+            self.run_dir = Path(resume_dir).expanduser()
+            run_name = self.run_dir.name
+        else:
+            model_name = config["model"]["name"]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_name = f"{model_name}_{timestamp}"
+            output_dir = Path(config["experiment"]["output_dir"]).expanduser()
+            self.run_dir = output_dir / run_name
 
-        output_dir = Path(config["experiment"]["output_dir"]).expanduser()
-        self.run_dir = output_dir / run_name
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
         # Sub-directories
