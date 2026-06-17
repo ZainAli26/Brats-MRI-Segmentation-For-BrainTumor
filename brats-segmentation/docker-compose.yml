@@ -29,6 +29,21 @@ x-gpu-common: &gpu-common
     - ./runs:/app/runs
     - ./.cache:/app/.cache
     - ./nnunet_data:/app/nnunet_data
+    # Live-mount source so code edits don't need a rebuild
+    - ./src:/app/src
+    - ./experiments:/app/experiments
+    - ./configs:/app/configs
+    - ./nnunet_native:/app/nnunet_native
+    - ./train.py:/app/train.py
+    - ./train_kfold.py:/app/train_kfold.py
+    - ./evaluate.py:/app/evaluate.py
+    - ./evaluate_kfold.py:/app/evaluate_kfold.py
+    - ./analyze_failures.py:/app/analyze_failures.py
+    - ./visualize_segmentations.py:/app/visualize_segmentations.py
+    - ./export_3d_html.py:/app/export_3d_html.py
+    - ./visualizations:/app/visualizations
+    - ./visualizations_3d:/app/visualizations_3d
+    - ./eval_exp18_fold0:/app/eval_exp18_fold0
   working_dir: /app
   shm_size: "8g"
 
@@ -191,6 +206,15 @@ services:
         --data_dir /data/Brats2024/training_data1_v2
         --fold 0
 
+  exp18-fold0-resume:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --fold 0
+        --resume_dir runs/nnunet_v2_20260507_021354_fold0
+
   exp18-fold1:
     <<: *gpu-common
     command: >
@@ -326,3 +350,131 @@ services:
     entrypoint: ["bash"]
     stdin_open: true
     tty: true
+
+  # ====================================================================
+  # Exp 18 — K-Fold Evaluation (with vs without post-processing)
+  # ====================================================================
+  # Usage:
+  #   docker-compose run --rm eval-kfold-val
+  #   docker-compose run --rm eval-kfold-test
+  eval-kfold-val:
+    <<: *gpu-common
+    command: >
+      python evaluate_kfold.py
+        --fold_dirs runs/nnunet_v2_20260507_021354_fold0
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --split val_fold0
+        --data_dir /data/Brats2024/training_data1_v2
+        --output_dir eval_exp18_fold0
+        --num_workers 4
+
+  eval-kfold-test:
+    <<: *gpu-common
+    command: >
+      python evaluate_kfold.py
+        --fold_dirs runs/nnunet_v2_20260507_021354_fold0
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --split all
+        --data_dir /data/Brats2024/training_data1_v2
+        --output_dir eval_exp18_fold0
+        --num_workers 4
+
+  # ====================================================================
+  # Exp 18 — Per-Case Segmentation Visualisations (3-D + multi-planar)
+  # ====================================================================
+  # Each command writes one PNG per case into ./visualizations/<split>/
+  #
+  # Usage:
+  #   docker-compose run --rm visualize-val    # 272 val cases (fold 0)
+  #   docker-compose run --rm visualize-test   # ~129 held-out test cases
+  #   docker-compose run --rm visualize-all    # both splits
+  #   docker-compose run --rm visualize-smoke  # 3 cases each, for a quick check
+
+  visualize-val:
+    <<: *gpu-common
+    command: >
+      python visualize_segmentations.py
+        --fold_dirs runs/nnunet_v2_20260507_021354_fold0
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --splits val_fold0
+        --data_dir /data/Brats2024/training_data1_v2
+        --output_dir visualizations
+        --num_workers 4
+
+  visualize-test:
+    <<: *gpu-common
+    command: >
+      python visualize_segmentations.py
+        --fold_dirs runs/nnunet_v2_20260507_021354_fold0
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --splits test
+        --data_dir /data/Brats2024/training_data1_v2
+        --output_dir visualizations
+        --num_workers 4
+
+  visualize-all:
+    <<: *gpu-common
+    command: >
+      python visualize_segmentations.py
+        --fold_dirs runs/nnunet_v2_20260507_021354_fold0
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --splits val_fold0 test
+        --data_dir /data/Brats2024/training_data1_v2
+        --output_dir visualizations
+        --num_workers 4
+
+  # Quick sanity check — 3 cases per split, no 3-D rendering
+  visualize-smoke:
+    <<: *gpu-common
+    command: >
+      python visualize_segmentations.py
+        --fold_dirs runs/nnunet_v2_20260507_021354_fold0
+        --config experiments/exp18_nnunet_v2_residual_5fold.yaml
+        --splits val_fold0 test
+        --data_dir /data/Brats2024/training_data1_v2
+        --output_dir visualizations/smoke
+        --max_cases 3
+        --no_3d
+        --num_workers 2
+
+  # ====================================================================
+  # Exp 18 — Interactive 3-D GT vs Prediction export (side-by-side HTML)
+  # ====================================================================
+  # Writes one self-contained, camera-synced HTML per case into
+  # ./visualizations_3d/{test_set,train_sample}/.  Open in any browser.
+  # plotly is pip-installed at start so no image rebuild is needed.
+  #
+  # Usage:
+  #   docker-compose run --rm export-3d         # test_set (val_fold0) + 50 train cases
+  #   docker-compose run --rm export-3d-smoke   # 2 cases per split, quick check
+
+  export-3d:
+    <<: *gpu-common
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        pip install -q plotly
+        python export_3d_html.py \
+          --fold_dirs runs/nnunet_v2_20260507_021354_fold0 \
+          --config experiments/exp18_nnunet_v2_residual_5fold.yaml \
+          --test_source val_fold0 \
+          --n_train 50 \
+          --output_dir visualizations_3d \
+          --data_dir /data/Brats2024/training_data1_v2 \
+          --num_workers 4
+
+  export-3d-smoke:
+    <<: *gpu-common
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        pip install -q plotly
+        python export_3d_html.py \
+          --fold_dirs runs/nnunet_v2_20260507_021354_fold0 \
+          --config experiments/exp18_nnunet_v2_residual_5fold.yaml \
+          --test_source val_fold0 \
+          --n_train 2 \
+          --output_dir visualizations_3d/smoke \
+          --data_dir /data/Brats2024/training_data1_v2 \
+          --max_cases 2 \
+          --num_workers 2

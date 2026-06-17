@@ -13,6 +13,9 @@ from pathlib import Path
 
 import torch
 from rich.console import Console
+
+torch.backends.cudnn.benchmark = True
+torch.set_float32_matmul_precision("high")
 from rich.panel import Panel
 
 from src.utils.experiment import load_config, ExperimentTracker

@@ -154,7 +154,7 @@ class Trainer:
     def _train_epoch(self, epoch: int) -> float:
         """Train for one epoch."""
         self.model.train()
-        epoch_loss = 0.0
+        epoch_loss = torch.zeros((), device=self.device)
         step = 0
 
         with Progress(
@@ -168,8 +168,8 @@ class Trainer:
             task = progress.add_task("training", total=len(self.train_loader))
 
             for batch_idx, batch_data in enumerate(self.train_loader):
-                images = batch_data["image"].to(self.device)
-                labels = batch_data["label"].to(self.device)
+                images = batch_data["image"].to(self.device, non_blocking=True)
+                labels = batch_data["label"].to(self.device, non_blocking=True)
 
                 with autocast(enabled=self.use_amp):
                     outputs = self.model(images)
@@ -181,13 +181,13 @@ class Trainer:
                 if (batch_idx + 1) % self.grad_accum_steps == 0:
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
-                    self.optimizer.zero_grad()
+                    self.optimizer.zero_grad(set_to_none=True)
 
-                epoch_loss += loss.item() * self.grad_accum_steps
+                epoch_loss += loss.detach() * self.grad_accum_steps
                 step += 1
                 progress.update(task, advance=1)
 
-        avg_loss = epoch_loss / max(step, 1)
+        avg_loss = (epoch_loss / max(step, 1)).item()
 
         if epoch % self.config["experiment"].get("log_interval", 10) == 0:
             console.print(f"  Epoch {epoch} | Loss: {avg_loss:.4f} | LR: {self.optimizer.param_groups[0]['lr']:.6f}")
@@ -201,14 +201,14 @@ class Trainer:
 
         regions = self.config["evaluation"]["regions"]
 
-        # Per-region Dice accumulators
-        region_dice_sums = {r: 0.0 for r in regions}
+        # Per-region Dice accumulators (kept on GPU to avoid per-sample sync)
+        region_dice_sums = {r: torch.zeros((), device=self.device) for r in regions}
         n_samples = 0
 
         with torch.no_grad():
             for batch_data in self.val_loader:
-                images = batch_data["image"].to(self.device)
-                labels = batch_data["label"].to(self.device)
+                images = batch_data["image"].to(self.device, non_blocking=True)
+                labels = batch_data["label"].to(self.device, non_blocking=True)
 
                 with autocast(enabled=self.use_amp):
                     outputs = sliding_window_inference(
@@ -225,26 +225,21 @@ class Trainer:
 
                 self.dice_metric(y_pred=outputs_onehot, y=labels_onehot)
 
-                # Compute region Dice
+                # Compute region Dice (vectorized — no per-sample .item() sync)
                 for pred_oh, lab_oh in zip(outputs_onehot, labels_onehot):
                     for region_name, label_indices in regions.items():
-                        pred_region = torch.zeros_like(pred_oh[0])
-                        lab_region = torch.zeros_like(lab_oh[0])
-                        for idx in label_indices:
-                            pred_region = torch.logical_or(pred_region, pred_oh[idx])
-                            lab_region = torch.logical_or(lab_region, lab_oh[idx])
-                        # Dice
+                        pred_region = pred_oh[label_indices].any(dim=0)
+                        lab_region = lab_oh[label_indices].any(dim=0)
                         intersection = (pred_region & lab_region).sum().float()
                         union = pred_region.sum().float() + lab_region.sum().float()
-                        dice = (2.0 * intersection / (union + 1e-7)).item()
-                        region_dice_sums[region_name] += dice
+                        region_dice_sums[region_name] += 2.0 * intersection / (union + 1e-7)
                     n_samples += 1
 
         # Per-class dice from MONAI metric
         class_dice = self.dice_metric.aggregate()
         mean_dice = class_dice.mean().item()
 
-        region_dice = {r: region_dice_sums[r] / max(n_samples, 1) for r in regions}
+        region_dice = {r: (region_dice_sums[r] / max(n_samples, 1)).item() for r in regions}
 
         mean_region_dice = sum(region_dice.values()) / len(region_dice)
         console.print(

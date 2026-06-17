@@ -18,6 +18,9 @@ from pathlib import Path
 import torch
 import pandas as pd
 from rich.console import Console
+
+torch.backends.cudnn.benchmark = True
+torch.set_float32_matmul_precision("high")
 from rich.panel import Panel
 from rich.table import Table
 
@@ -101,7 +104,7 @@ def train_fold(config, fold_idx, train_cases, val_cases, args):
     best_dice = trainer.train()
 
     # Save fold summary
-    best_ckpt_path = fold_run_dir / "best_model.pth"
+    best_ckpt_path = tracker.run_dir / "best_model.pth"
     region_dice = {}
     if best_ckpt_path.exists():
         ckpt = torch.load(str(best_ckpt_path), map_location="cpu", weights_only=False)
@@ -131,11 +134,22 @@ def main():
     parser.add_argument("--data_dir", type=str, help="Override data.train_dir in config")
     parser.add_argument("--resume_dir", type=str,
                         help="Directory containing fold*/best_model.pth to resume from")
+    parser.add_argument("--smoke_test", action="store_true",
+                        help="Quick sanity check: 3 epochs, single fold. Use for code/config validation.")
+    parser.add_argument("--max_epochs", type=int, default=None,
+                        help="Override training.epochs from config (handy for local timing runs).")
     args = parser.parse_args()
 
     config = load_config(args.config)
     if args.data_dir:
         config["data"]["train_dir"] = args.data_dir
+    if args.smoke_test:
+        config["training"]["epochs"] = 3
+        config["training"]["val_interval"] = 2
+        config["training"]["early_stopping_patience"] = 99
+        args.fold = 0 if args.fold is None else args.fold
+    if args.max_epochs:
+        config["training"]["epochs"] = args.max_epochs
 
     n_folds = config["data"].get("n_folds", 5)
     config["data"]["n_folds"] = n_folds

@@ -228,7 +228,6 @@
 - Patch size: 128³ vs 160×192×128 (limited by 8 GB GPU)
 - Training data: 75% of dataset vs 100% with 5-fold cross-validation
 - No post-processing (connected component analysis, threshold tuning)
-- No model ensembling
 
 ## Remaining Experiments
 

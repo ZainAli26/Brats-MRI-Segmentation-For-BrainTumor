@@ -1,5 +1,8 @@
-# Exp 18 — nnU-Net v2 ResidualEncoderUNet with 5-Fold CV and 128×160×128 patch
-# Question: Does the residual encoder (47.1M) outperform plain (31.2M) with full data?
+# Dev/iteration version of exp18 — for local 3070 experimentation only.
+# Faster patch + fewer epochs + 1 fold. NOT publication-grade — use exp18 on cloud for that.
+#
+# Wall-clock target on 3070: ~2-3 hours for 80 epochs.
+# Use this to test code changes, augmentations, loss weights, schedules — NOT for final numbers.
 
 data:
   dataset: "brats2024"
@@ -13,7 +16,7 @@ data:
   n_folds: 5
 
 preprocessing:
-  spatial_size: [160, 192, 128]
+  spatial_size: [128, 128, 128]      # smaller patch — fits 3070 with headroom
   norm_method: "zscore_nonzero"
   augmentation:
     random_flip_prob: 0.5
@@ -36,18 +39,18 @@ model:
     deep_supervision: true
 
 training:
-  epochs: 300
+  epochs: 80                          # was 300 — enough to see convergence trend
   batch_size: 1
   num_workers: 6
   learning_rate: 0.0001
   weight_decay: 0.00001
   optimizer: "adamw"
   scheduler: "cosine_warm_restarts"
-  scheduler_params: {T_0: 50, T_mult: 2, eta_min: 0.000001}
+  scheduler_params: {T_0: 30, T_mult: 2, eta_min: 0.000001}   # shorter restart cycle
   amp: true
   grad_accum_steps: 2
   val_interval: 10
-  early_stopping_patience: 30
+  early_stopping_patience: 20         # was 30 — bail earlier
   loss: "dice_ce"
   dice_weight: 1.0
   ce_weight: 1.0
