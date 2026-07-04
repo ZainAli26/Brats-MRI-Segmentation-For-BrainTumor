@@ -41,6 +41,16 @@ run_native_nnunet() {
     echo "  Finished: $(date)"
 }
 
+run_native_resenc_5fold() {
+    echo ""
+    echo "================================================================"
+    echo "  EXPERIMENT 19: Native nnU-Net v2 ResEnc-L, 5-fold CV (exp18 replica)"
+    echo "  Started: $(date)"
+    echo "================================================================"
+    bash nnunet_native/run_resenc_5fold.sh --data_dir ../Brats2024/training_data1_v2 --gpu 0 --preset L
+    echo "  Finished: $(date)"
+}
+
 eval_exp() {
     local num=$1
     # Find the most recent run dir for this experiment's model
@@ -61,6 +71,9 @@ eval_exp() {
 }
 
 case "${1:-help}" in
+    # Native nnU-Net experiments (must precede the numeric matcher: "19" is 2 digits)
+    19|p5b) run_native_resenc_5fold ;;
+
     # Individual experiments
     [0-9]|[0-9][0-9])
         run_exp "$1"
@@ -116,7 +129,8 @@ case "${1:-help}" in
         echo "    9  nnunet_v2 plain"
         echo "    10 nnunet_v2 residual"
         echo "  Phase 5 — Native nnU-Net v2"
-        echo "    p5 native pipeline         (own preprocessing)"
+        echo "    p5      native pipeline    (holdout split, default PlainConv)"
+        echo "    19/p5b  native ResEnc 5-fold (exp18 replica, real framework)"
         echo "  Phase 6 — BraTS 2023"
         echo "    11 best model on BraTS 2023"
         echo "  Phase 7 — Cross-dataset"

@@ -6,7 +6,7 @@ camera-synced 3-D scenes:
 
     ┌────────────── Ground Truth ──────────────┬────────────── Prediction ──────────────┐
     │   marching-cubes surfaces of the          │   marching-cubes surfaces of the model  │
-    │   annotated tumour (NCR / ED / ET)        │   prediction (NCR / ED / ET)            │
+    │   annotated tumour (NETC/SNFH/ET/RC)      │   prediction (NETC/SNFH/ET/RC)          │
     └───────────────────────────────────────────┴─────────────────────────────────────────┘
 
 Rotating/zooming one scene drives the other (synchronised camera) so the
@@ -62,7 +62,7 @@ from torch.cuda.amp import autocast
 
 from src.data.dataset import build_file_list
 from src.data.preprocessing import get_val_transforms
-from src.data.splits import create_kfold_splits, create_patient_splits
+from src.data.splits import create_kfold_splits, create_patient_splits, resolve_train_dirs
 from src.evaluation.postprocessing import postprocess_prediction
 from src.models.factory import create_model
 from src.utils import inference_wrapper
@@ -73,8 +73,9 @@ console = Console()
 # ── colours (match visualize_segmentations.py) ────────────────────────────────
 DARK_BG = "#0d1117"
 TEXT_CLR = "#e6edf3"
-HEX_COLORS = {1: "#FF4545", 2: "#FFD700", 3: "#00CFFF"}   # NCR, ED, ET
-LABEL_NAMES = {1: "NCR (necrotic core)", 2: "ED (oedema)", 3: "ET (enhancing)"}
+HEX_COLORS = {1: "#FF4545", 2: "#FFD700", 3: "#00CFFF", 4: "#A659F2"}  # NETC, SNFH, ET, RC
+LABEL_NAMES = {1: "NETC (non-enhancing core)", 2: "SNFH (FLAIR hyperintensity)",
+               3: "ET (enhancing tissue)", 4: "RC (resection cavity)"}
 
 # JS injected into every HTML: keep both 3-D cameras in lock-step.
 _CAMERA_SYNC_JS = """
@@ -117,7 +118,7 @@ def _downsample_seg(seg: np.ndarray, target_max: int) -> np.ndarray:
 def _class_meshes(seg: np.ndarray, min_voxels: int = 8):
     """Yield (class, verts, faces) marching-cubes meshes for each tumour class."""
     from skimage.measure import marching_cubes
-    for cls in (2, 1, 3):  # ED (largest) first, ET last
+    for cls in (2, 4, 1, 3):  # SNFH (largest) first, RC, NETC, ET last
         mask = (seg == cls).astype(np.float32)
         if mask.sum() < min_voxels:
             continue
@@ -151,7 +152,7 @@ def _add_meshes(fig, seg: np.ndarray, scene: str, col: int):
                 x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
                 i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
                 color=HEX_COLORS[cls],
-                opacity=0.55 if cls == 2 else 0.9,   # oedema translucent so core shows through
+                opacity=0.55 if cls == 2 else 0.9,   # SNFH translucent so core shows through
                 name=LABEL_NAMES[cls],
                 showlegend=(col == 1),               # one legend entry per class
                 legendgroup=str(cls),
@@ -346,10 +347,11 @@ def main():
         sys.exit(1)
 
     # ── resolve test + train case lists ──────────────────────────────────────
-    kfold_splits = create_kfold_splits(str(data_dir), n_folds=n_folds,
+    data_sources = resolve_train_dirs(config["data"])  # pool any extra_train_dirs
+    kfold_splits = create_kfold_splits(data_sources, n_folds=n_folds,
                                        seed=config["data"]["split_seed"])
     train_cases_master, _, patient_test = create_patient_splits(
-        str(data_dir), split_ratios=[0.75, 0.15, 0.10], seed=config["data"]["split_seed"],
+        data_sources, split_ratios=[0.75, 0.15, 0.10], seed=config["data"]["split_seed"],
     )
 
     if args.test_source == "patient":

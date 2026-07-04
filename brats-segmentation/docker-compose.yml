@@ -247,6 +247,71 @@ services:
         --data_dir /data/Brats2024/training_data1_v2
         --fold 4
 
+  # exp20 — custom loop, TRUE ResEnc-M architecture (~102M), SGD recipe, 5-fold CV.
+  exp20:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+
+  exp20-fold0:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold 0
+
+  exp20-fold1:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold 1
+
+  exp20-fold2:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold 2
+
+  exp20-fold3:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold 3
+
+  exp20-fold4:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold 4
+
+  # Resume the interrupted fold-2 run (continues in-place from its best_model.pth).
+  exp20-fold2-resume:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold 2
+        --resume_dir runs/nnunet_v2_20260630_160330_fold2
+
   # ====================================================================
   # Phase 4 — nnU-Net v2 architecture variants
   # ====================================================================
@@ -304,6 +369,26 @@ services:
       python train.py
         --config experiments/exp13_train2023_test2024.yaml
         --data_dir /data/Brats2023/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
+
+  # ====================================================================
+  # Overfit sanity check — memorize 50 MRIs (train = val = test, aug OFF)
+  # ====================================================================
+  # Pick the experiment via the OFIT_CONFIG host env var (interpolated by compose
+  # at parse time, so it must be exported on the host — not passed with -e).
+  # Defaults to BraTS-2024 data; override OFIT_DATA for the 2023 experiments.
+  #
+  # Usage:
+  #   OFIT_CONFIG=overfit_exp19_nnunet_native_resenc_5fold.yaml docker-compose run --rm overfit
+  #   OFIT_CONFIG=overfit_exp01_segresnet_baseline.yaml         docker-compose run --rm overfit
+  #   OFIT_CONFIG=overfit_exp13_train2023_test2024.yaml \
+  #     OFIT_DATA=/data/Brats2023/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData \
+  #     docker-compose run --rm overfit
+  overfit:
+    <<: *gpu-common
+    command: >
+      python train.py
+        --config experiments/overfit/${OFIT_CONFIG}
+        --data_dir ${OFIT_DATA:-/data/Brats2024/training_data1_v2}
 
   # ====================================================================
   # Utilities

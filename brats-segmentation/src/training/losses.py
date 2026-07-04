@@ -16,12 +16,16 @@ def create_loss(config: dict) -> nn.Module:
     """
     loss_name = config["training"]["loss"]
     num_classes = config["data"]["num_classes"]
+    # nnU-Net v2 computes Dice over the whole batch (pooled), which stabilizes the
+    # gradient for small/often-absent classes (ET, NETC). Off by default.
+    batch_dice = config["training"].get("batch_dice", False)
 
     if loss_name == "dice_ce":
         loss_fn = DiceCELoss(
             include_background=False,
             to_onehot_y=True,
             softmax=True,
+            batch=batch_dice,
             lambda_dice=config["training"]["dice_weight"],
             lambda_ce=config["training"]["ce_weight"],
         )
@@ -30,6 +34,7 @@ def create_loss(config: dict) -> nn.Module:
             include_background=False,
             to_onehot_y=True,
             softmax=True,
+            batch=batch_dice,
             lambda_dice=config["training"]["dice_weight"],
             lambda_focal=config["training"]["ce_weight"],
             gamma=2.0,
@@ -41,12 +46,37 @@ def create_loss(config: dict) -> nn.Module:
 
 
 class DeepSupervisionLoss(nn.Module):
-    """Wrapper for deep supervision loss (used with DynUNet)."""
+    """Wrapper for deep supervision loss (used with nnU-Net v2 / DynUNet).
 
-    def __init__(self, base_loss: nn.Module, weights: list = None):
+    nnU-Net-exact mode (the default):
+      * weights = [1, 1/2, 1/4, ...]; the LOWEST-resolution head is zeroed
+        (nnU-Net sets weights[-1] = 0) and the rest are renormalized to sum 1.
+      * the loss at each head is computed at the head's OWN (lower) resolution by
+        DOWNSAMPLING the ground-truth label with nearest-neighbour interpolation
+        (nnU-Net's DownsampleSegForDSTransform), NOT by upsampling the prediction.
+
+    Set downsample_target=False to fall back to the legacy behaviour (upsample the
+    prediction to full resolution), and zero_lowest=False to keep every head active.
+    """
+
+    def __init__(self, base_loss: nn.Module, weights: list = None,
+                 downsample_target: bool = True, zero_lowest: bool = True):
         super().__init__()
         self.base_loss = base_loss
         self.weights = weights
+        self.downsample_target = downsample_target
+        self.zero_lowest = zero_lowest
+
+    def _resolve_weights(self, n: int):
+        if self.weights is not None:
+            weights = list(self.weights[:n])
+        else:
+            weights = [1.0 / (2 ** i) for i in range(n)]
+        # nnU-Net zeroes the lowest-resolution (deepest) head before normalizing.
+        if self.zero_lowest and n > 1:
+            weights[-1] = 0.0
+        w_sum = sum(weights) or 1.0
+        return [w / w_sum for w in weights]
 
     def forward(self, predictions, target):
         # Handle different deep supervision output formats:
@@ -64,17 +94,23 @@ class DeepSupervisionLoss(nn.Module):
         if not isinstance(predictions, (list, tuple)):
             return self.base_loss(predictions, target)
 
+        from torch.nn.functional import interpolate
+
         n = len(predictions)
-        weights = self.weights or [1.0 / (2 ** i) for i in range(n)]
-        # Normalize weights
-        w_sum = sum(weights[:n])
-        weights = [w / w_sum for w in weights[:n]]
+        weights = self._resolve_weights(n)
 
         total_loss = 0
         for i, pred in enumerate(predictions):
+            if weights[i] == 0.0:
+                continue  # skip the zeroed (deepest) head entirely
             if pred.shape[2:] != target.shape[2:]:
-                # Deep supervision outputs may be at lower resolution
-                from torch.nn.functional import interpolate
+                if self.downsample_target:
+                    # nnU-Net-exact: shrink the label to the head's resolution
+                    # (nearest preserves discrete class ids; the base loss one-hots).
+                    tgt = interpolate(target.float(), size=pred.shape[2:], mode="nearest")
+                    total_loss += weights[i] * self.base_loss(pred, tgt)
+                    continue
+                # Legacy: upsample the prediction to full resolution instead.
                 pred = interpolate(pred, size=target.shape[2:], mode="trilinear", align_corners=False)
             total_loss += weights[i] * self.base_loss(pred, target)
 

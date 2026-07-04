@@ -17,10 +17,11 @@ from rich.console import Console
 from rich.panel import Panel
 
 from src.utils.experiment import load_config, ExperimentTracker
-from src.data.splits import create_patient_splits
+from src.data.splits import create_patient_splits, resolve_train_dirs
 from src.data.dataset import build_file_list
 from src.data.preprocessing import get_val_transforms
 from src.models.factory import create_model
+from src.utils import get_class_names
 from src.evaluation.metrics import compute_case_metrics, print_metrics_summary
 from src.evaluation.failure_analysis import identify_failure_cases, print_failure_summary, generate_failure_report
 from src.evaluation.visualization import (
@@ -63,10 +64,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     console.print(f"[dim]Device: {device}[/dim]\n")
 
-    # Recreate same patient splits
-    data_dir = Path(config["data"]["train_dir"]).expanduser()
+    # Recreate same patient splits (pool train_dir + any extra_train_dirs)
     train_cases, val_cases, test_cases = create_patient_splits(
-        str(data_dir),
+        resolve_train_dirs(config["data"]),
         split_ratios=config["data"]["split_ratios"],
         seed=config["data"]["split_seed"],
     )
@@ -181,6 +181,7 @@ def main():
                     image_np, label_np, pred, case_id,
                     str(eval_dir / "case_visualizations"),
                     metrics=case_metrics,
+                    class_names=get_class_names(config),
                 )
         else:
             console.print("[green]No failure cases identified![/green]")

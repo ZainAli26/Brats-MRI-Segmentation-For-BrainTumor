@@ -1,0 +1,147 @@
+# Exp 21 — CUSTOM LOOP, SegResNet architecture, exp19 recipe, 5-Fold CV (BraTS 2024)
+#
+# exp21 is a DERIVATION OF exp19 (a sibling of exp20). Everything (data,
+# preprocessing/augmentation, optimizer + schedule recipe, inference,
+# postprocessing, evaluation) is copied from exp19 verbatim. The ONE deliberate
+# change is the ARCHITECTURE:
+#
+#     exp19 / exp20:  residual-encoder nnU-Net (ResEnc)
+#     exp21:          SegResNet (the exp01 baseline architecture)
+#
+# Why: exp19 (native ResEnc) and exp20 (custom-loop true ResEnc-M) both fix the
+# architecture family to residual-encoder U-Net. exp21 runs the SAME exp19
+# preprocessing + postprocessing + nnU-Net-style recipe but on SegResNet, so
+# exp21 vs exp20 isolates the architecture (SegResNet vs ResEnc) under an
+# identical pipeline, and exp21 vs exp01 isolates the pipeline (exp19's nnU-Net
+# augmentation/recipe/inference/postprocessing vs exp01's plain baseline) on the
+# same SegResNet.
+#
+# NOTE: this is the CUSTOM-LOOP experiment (model.name = "segresnet", built by
+# src/models/factory.py). It does NOT go through the native nnU-Net pipeline, so
+# exp19's `native:` block is intentionally absent here. See exp19 for the native run.
+#
+# Launch (custom k-fold loop):
+#   python train_kfold.py --config experiments/exp21_segresnet_resenc_recipe_5fold.yaml \
+#       --data_dir ../Brats2024/training_data1_v2
+
+data:
+  dataset: "brats2024"
+  train_dir: "../Brats2024/training_data1_v2"
+  val_dir: "../Brats2024/validation_data"
+  modalities: ["t1c", "t1n", "t2f", "t2w"]
+  num_classes: 5
+  label_map: {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
+  inverse_label_map: {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
+  class_names: {1: "NETC", 2: "SNFH", 3: "ET", 4: "RC"}
+  split_seed: 42                       # same seed/folds as exp18/exp19/exp20 -> identical partition
+  split_ratios: [0.75, 0.15, 0.10]     # used by the train.py path (e.g. overfit)
+  n_folds: 5
+  # Disk cache (MONAI PersistentDataset): caches the deterministic transform prefix so
+  # epochs 2+ are GPU-bound, not I/O-bound (GPU 0% waiting on disk). Epoch 1 populates
+  # it. Distinct dir per experiment; clear if the transform changes.
+  cache_dir: "/app/.cache/persistent/exp21"
+
+# Copied from exp19 VERBATIM (patch [160,192,128], nnU-Net augmentation preset,
+# foreground oversampling). This is the "same preprocessing as exp19" requirement.
+preprocessing:
+  spatial_size: [160, 192, 128]
+  norm_method: "zscore_nonzero"
+  augmentation:
+    preset: "nnunet"          # full nnU-Net v2 augmentation set (affine, noise, blur, gamma, mirror)
+    crop_pos: 1               # foreground oversampling ~33% (pos:neg = 1:2), like nnU-Net
+    crop_neg: 2
+    # Legacy knobs kept so the overfit path (which zeroes every aug value) still runs:
+    random_flip_prob: 0.5
+    random_rotate_prob: 0.3
+    random_rotate_range: 0.5236
+    random_intensity_shift: 0.1
+    random_intensity_scale: 0.1
+
+# ---- THE ARCHITECTURAL CHANGE vs exp19/exp20: SegResNet (from exp01) ------------
+model:
+  name: "segresnet"
+  in_channels: 4
+  out_channels: 5
+  segresnet:
+    init_filters: 32
+    blocks_down: [1, 2, 2, 4]
+    blocks_up: [1, 1, 1]
+    dropout_prob: 0.2
+    # SegResNet has no built-in checkpointing flag; the factory wraps its down/up
+    # res-block stages in torch.utils.checkpoint. Required to fit the [160,192,128]
+    # patch on 8 GB (same trick exp18 used for nnU-Net). ~25% slower.
+    grad_checkpointing: true
+# --------------------------------------------------------------------------------
+
+training:
+  # Same recipe as exp19 (nnU-Net v2's own: SGD+Nesterov, poly-LR, batch-Dice, deep
+  # supervision where supported). Held fixed so exp21 differs from exp19/exp20 only
+  # by the architecture.
+  # CAVEAT: a custom-loop "epoch" is a full pass over the dataset, NOT nnU-Net's fixed
+  # 250 iterations — so total compute/duration won't match even though techniques do.
+  epochs: 250
+  # Fixed-iteration epochs (architecture-agnostic): each epoch = 250 OPTIMIZER STEPS
+  # sampling with replacement. 250 x 250 = 62,500 steps -> same shared budget as the
+  # ResEnc runs (20/22/24), so the SegResNet line trains on an equal footing.
+  iters_per_epoch: 250
+  batch_size: 1
+  num_workers: 6
+
+  # ---- Optimizer / schedule (configurable) -------------------------------------
+  # ACTIVE = Adam @ 1e-4 (SegResNet runs use Adam per request). NOTE: this DEVIATES
+  # from exp19's SGD recipe — SegResNet experiments (exp21/23/25) use Adam, while the
+  # ResEnc experiments (exp20/22/24) keep SGD. So exp21-vs-exp20 etc. now differ by
+  # BOTH architecture AND optimizer; switch to the SGD block below for an
+  # apples-to-apples recipe with the ResEnc runs.
+  optimizer: "adam"
+  learning_rate: 0.0001         # 1e-4 — SegResNet's proven LR (exp01); far below SGD's 1e-2
+  weight_decay: 0.00001         # 1e-5
+  scheduler: "poly"             # monotonic poly decay
+  poly_exponent: 0.9
+  warmup_epochs: 0              # Adam needs no warmup (no SGD@1e-2 background collapse to avoid)
+  # --- nnU-Net-pure SGD alternative (uncomment these, comment the Adam block above): -
+  # optimizer: "sgd"
+  # learning_rate: 0.01         # nnU-Net's own LR; needs warmup at batch 1
+  # weight_decay: 0.00003       # 3e-5
+  # momentum: 0.99
+  # nesterov: true
+  # scheduler: "poly"
+  # poly_exponent: 0.9
+  # warmup_epochs: 50           # warmup prevents background collapse at batch 1
+  # warmup_start_factor: 0.01
+  # ------------------------------------------------------------------------------
+
+  amp: true
+  grad_accum_steps: 2
+  val_interval: 10
+  early_stopping_patience: 1000  # effectively off — train the full schedule
+  loss: "dice_ce"
+  batch_dice: true              # pool Dice over the batch (helps small ET/NETC at batch>1)
+  dice_weight: 1.0
+  ce_weight: 1.0
+  sw_batch_size: 2
+  sw_overlap: 0.5
+
+# nnU-Net v2-style inference for the custom-loop path (src/evaluation/metrics.py).
+# Copied from exp19 -> identical pre/post-processing and inference.
+inference:
+  mode: "gaussian"     # Gaussian importance-weighted sliding window (nnU-Net default)
+  tta: true            # mirroring TTA: average softmax over axis flips (2^3 = 8 passes)
+  overlap: 0.5
+  postprocess: true    # connected-component cleanup + tiny-ET suppression + hole fill
+
+evaluation:
+  metrics: ["dice", "hausdorff95"]
+  regions:
+    ET: [3]
+    TC: [1, 3]
+    WT: [1, 2, 3]
+    RC: [4]            # Resection Cavity
+  failure_dice_threshold: 0.5
+  small_tumor_volume_threshold: 500
+  num_failure_cases: 10
+
+experiment:
+  output_dir: "./runs"
+  save_best_only: true
+  log_interval: 10

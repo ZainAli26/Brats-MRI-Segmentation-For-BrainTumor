@@ -113,6 +113,48 @@ python analyze_failures.py \
 
 ---
 
+## Phase 5b — Native nnU-Net v2 ResEnc, 5-Fold CV (exp18 replica)
+
+**Question:** Run the *exact* exp18 comparison (residual-encoder nnU-Net, 5-fold
+patient-level CV on BraTS 2024) through the **real nnU-Net v2 framework** — its own
+self-configured planning, preprocessing, 1000-epoch `nnUNetTrainer`, augmentation, and
+sliding-window inference. How much of exp18's result is the architecture vs. our custom
+training loop?
+
+What is held fixed vs. exp18: dataset, residual-encoder family, patient-level 5-fold,
+`split_seed=42`, label remap, and the ET/TC/WT metrics. What nnU-Net decides for itself:
+patch size, normalization, batch size, ResEnc depth (ResEnc-L preset), epochs, LR schedule,
+optimizer, loss, and augmentation.
+
+**Data hygiene:** a test set (the same seed-42 10% patients as `create_patient_splits`) is
+**held out of every training fold** — it goes to `imagesTs` and is never trained on. The
+5-fold CV runs on the train+val pool only. Two numbers are reported: (a) out-of-fold
+validation Dice (the CV metric, pool only) and (b) held-out test Dice from the 5-fold
+ensemble (fully leak-free, comparable to the holdout native run and custom models on the
+same test set). This differs from exp18, which K-folds *all* data with no held-out test.
+
+| Run | Config (reference) | Command |
+|-----|--------------------|---------|
+| 5b.1 | `exp19_nnunet_native_resenc_5fold.yaml` | `bash nnunet_native/run_resenc_5fold.sh --gpu 0 --preset L` |
+
+Designed for a 24 GB+ GPU (ResEnc-L). On an 8 GB card pass `--preset M`. Train a single
+fold first with `--folds 0` to sanity-check before launching all five.
+
+**Evaluate** (out-of-fold validation predictions = the true 5-fold CV metric — done
+automatically as Step 4 of the runner, or manually):
+```bash
+python nnunet_native/evaluate_nnunet_kfold.py \
+    --results_dir nnunet_data/nnUNet_results/Dataset102_BraTS2024ResEnc/nnUNetTrainer__nnUNetResEncUNetLPlans__3d_fullres \
+    --data_dir ../Brats2024/training_data1_v2 \
+    --output_dir runs/exp19_nnunet_native_resenc_eval
+
+# Head-to-head: real framework (exp19) vs custom loop (exp18)
+python analyze_failures.py \
+    --run_dirs runs/exp19_nnunet_native_resenc_eval runs/<exp18_eval_dir> --compare
+```
+
+---
+
 ## Phase 6 — BraTS 2023 Best Model
 
 **Question:** Does the best architecture from Phase 1 also perform well on BraTS 2023?

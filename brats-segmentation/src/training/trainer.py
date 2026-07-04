@@ -33,13 +33,20 @@ class Trainer:
         # Wrap loss for deep supervision (nnU-Net v2 or DynUNet)
         model_name = config["model"]["name"]
         uses_deep_sup = False
-        if model_name == "nnunet_v2":
+        if model_name.startswith("nnunet_v2"):
             uses_deep_sup = config["model"]["nnunet_v2"].get("deep_supervision", False)
         elif model_name == "dynunet":
             uses_deep_sup = config["model"].get("dynunet", {}).get("deep_supervision", False)
 
         if uses_deep_sup:
-            self.loss_fn = DeepSupervisionLoss(loss_fn)
+            # nnU-Net-exact deep supervision by default: downsample the GT label to
+            # each head's resolution and zero the lowest-resolution head's weight.
+            # Both are overridable from the training config for ablations.
+            self.loss_fn = DeepSupervisionLoss(
+                loss_fn,
+                downsample_target=config["training"].get("ds_downsample_target", True),
+                zero_lowest=config["training"].get("ds_zero_lowest", True),
+            )
         else:
             self.loss_fn = loss_fn
 
@@ -51,6 +58,15 @@ class Trainer:
             self.optimizer = torch.optim.AdamW(
                 self.model.parameters(),
                 lr=train_cfg["learning_rate"],
+                weight_decay=train_cfg["weight_decay"],
+            )
+        elif train_cfg["optimizer"] == "sgd":
+            # nnU-Net v2 recipe: SGD with high Nesterov momentum.
+            self.optimizer = torch.optim.SGD(
+                self.model.parameters(),
+                lr=train_cfg["learning_rate"],
+                momentum=train_cfg.get("momentum", 0.99),
+                nesterov=train_cfg.get("nesterov", True),
                 weight_decay=train_cfg["weight_decay"],
             )
         else:
@@ -66,6 +82,32 @@ class Trainer:
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 self.optimizer, T_0=sp["T_0"], T_mult=sp["T_mult"], eta_min=sp["eta_min"]
             )
+        elif train_cfg["scheduler"] == "poly":
+            # nnU-Net v2 recipe: polynomial decay  lr = lr0 * (1 - e/E)^exponent,
+            # with an optional linear LR warmup (warmup_epochs) — warmup ramps lr from
+            # warmup_start_factor*lr0 up to lr0, which prevents the from-scratch
+            # background-collapse SGD@1e-2 hits at batch size 1.
+            exponent = train_cfg.get("poly_exponent", 0.9)
+            total_epochs = max(train_cfg["epochs"], 1)
+            warmup = int(train_cfg.get("warmup_epochs", 0))
+            warmup_start = float(train_cfg.get("warmup_start_factor", 0.01))
+
+            def _poly_with_warmup(ep, _w=warmup, _ws=warmup_start,
+                                  _E=total_epochs, _x=exponent):
+                if _w > 0 and ep < _w:
+                    return _ws + (1.0 - _ws) * (ep + 1) / _w
+                prog = (ep - _w) / max(1, _E - _w)
+                return (1.0 - min(prog, 1.0)) ** _x
+
+            self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+                self.optimizer, lr_lambda=_poly_with_warmup
+            )
+        elif train_cfg["scheduler"] == "constant":
+            # Fixed LR for the whole run (used by the overfit sanity check — a decaying
+            # LR stalls memorization before it fully fits).
+            self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+                self.optimizer, lr_lambda=lambda _e: 1.0
+            )
         else:
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.optimizer, T_max=train_cfg["epochs"], eta_min=1e-7
@@ -75,6 +117,19 @@ class Trainer:
         self.use_amp = train_cfg["amp"] and self.device.type == "cuda"
         self.scaler = GradScaler(enabled=self.use_amp)
         self.grad_accum_steps = train_cfg.get("grad_accum_steps", 1)
+
+        # nnU-Net-style fixed-iteration epochs. When set, an "epoch" is exactly
+        # `iters_per_epoch` OPTIMIZER STEPS (nnU-Net uses 250), sampling patches with
+        # replacement, instead of one full pass over the dataset. This decouples the
+        # training budget from dataset size so it matches nnU-Net's regime. None ->
+        # legacy full-pass behaviour. `_batch_gen` is the persistent cycling iterator.
+        self.iters_per_epoch = train_cfg.get("iters_per_epoch")
+        self._batch_gen = None
+
+        # Gradient-norm clipping (nnU-Net v2 default = 12). Bounds exploding gradients
+        # so a hot LR + AMP can't blow weights up to NaN and collapse to all-background.
+        # Set max_grad_norm: 0 (or null) in the config to disable.
+        self.max_grad_norm = train_cfg.get("max_grad_norm", 12.0)
 
         # Metrics for validation
         self.dice_metric = DiceMetric(include_background=False, reduction="mean_batch")
@@ -151,11 +206,31 @@ class Trainer:
         console.print(f"\n[bold green]Training complete. Best val Dice: {self.best_val_dice:.4f}[/bold green]")
         return self.best_val_dice
 
+    def _iter_train_batches(self):
+        """Yield training batches indefinitely, recreating the loader iterator
+        each time it is exhausted (sampling-with-replacement across epochs).
+        Used only by the fixed-iteration epoch mode."""
+        while True:
+            for batch in self.train_loader:
+                yield batch
+
     def _train_epoch(self, epoch: int) -> float:
         """Train for one epoch."""
         self.model.train()
         epoch_loss = torch.zeros((), device=self.device)
         step = 0
+
+        # Fixed-iteration mode (nnU-Net): run exactly iters_per_epoch optimizer steps,
+        # i.e. iters_per_epoch * grad_accum_steps forward passes, cycling the loader.
+        if self.iters_per_epoch:
+            num_forward = self.iters_per_epoch * self.grad_accum_steps
+            if self._batch_gen is None:
+                self._batch_gen = self._iter_train_batches()
+            batch_iter = ((i, next(self._batch_gen)) for i in range(num_forward))
+            total = num_forward
+        else:
+            batch_iter = enumerate(self.train_loader)
+            total = len(self.train_loader)
 
         with Progress(
             SpinnerColumn(),
@@ -165,9 +240,9 @@ class Trainer:
             TimeElapsedColumn(),
             console=console,
         ) as progress:
-            task = progress.add_task("training", total=len(self.train_loader))
+            task = progress.add_task("training", total=total)
 
-            for batch_idx, batch_data in enumerate(self.train_loader):
+            for batch_idx, batch_data in batch_iter:
                 images = batch_data["image"].to(self.device, non_blocking=True)
                 labels = batch_data["label"].to(self.device, non_blocking=True)
 
@@ -179,6 +254,13 @@ class Trainer:
                 self.scaler.scale(loss).backward()
 
                 if (batch_idx + 1) % self.grad_accum_steps == 0:
+                    if self.max_grad_norm:
+                        # nnU-Net clips gradient norm to 12. Must unscale before
+                        # clipping under AMP; bounds exploding grads -> no NaN blow-up.
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), self.max_grad_norm
+                        )
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                     self.optimizer.zero_grad(set_to_none=True)
@@ -204,6 +286,9 @@ class Trainer:
         # Per-region Dice accumulators (kept on GPU to avoid per-sample sync)
         region_dice_sums = {r: torch.zeros((), device=self.device) for r in regions}
         n_samples = 0
+        # Diagnostic: total predicted voxels per class across the val set. If everything
+        # lands in class 0, the model has collapsed to all-background (Dice -> 0.00).
+        pred_voxels = None
 
         with torch.no_grad():
             for batch_data in self.val_loader:
@@ -222,6 +307,11 @@ class Trainer:
 
                 outputs_onehot = [self.post_pred(o) for o in outputs_list]
                 labels_onehot = [self.post_label(l) for l in labels_list]
+
+                # Accumulate predicted voxels/class (collapse detector)
+                for pred_oh in outputs_onehot:
+                    counts = pred_oh.sum(dim=(1, 2, 3))
+                    pred_voxels = counts if pred_voxels is None else pred_voxels + counts
 
                 self.dice_metric(y_pred=outputs_onehot, y=labels_onehot)
 
@@ -248,6 +338,11 @@ class Trainer:
             + " | ".join(f"{r}: {d:.4f}" for r, d in region_dice.items())
             + f" | Class Dice: {mean_dice:.4f}"
         )
+        if pred_voxels is not None:
+            counts = [int(v) for v in pred_voxels.tolist()]
+            collapsed = sum(counts[1:]) == 0  # no foreground predicted at all
+            flag = " [red]<- COLLAPSE: all background[/red]" if collapsed else ""
+            console.print(f"  [dim]Pred voxels/class {counts}[/dim]{flag}")
 
         return {"mean_dice": mean_dice, "region_dice": region_dice}
 

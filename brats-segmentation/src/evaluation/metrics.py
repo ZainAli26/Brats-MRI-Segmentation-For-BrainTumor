@@ -8,7 +8,7 @@ import pandas as pd
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.transforms import AsDiscrete
 from monai.inferers import sliding_window_inference
-from src.utils import inference_wrapper
+from src.utils import inference_wrapper, get_class_names
 from monai.data import decollate_batch
 from torch.cuda.amp import autocast
 from tqdm import tqdm
@@ -39,6 +39,16 @@ def compute_case_metrics(
     regions = config["evaluation"]["regions"]
     use_amp = config["training"]["amp"] and device.type == "cuda"
 
+    # nnU-Net-style inference (Gaussian weighting + mirroring TTA + post-processing),
+    # gated by an optional `inference:` config block. Absent -> old behavior.
+    from src.evaluation.inference import predict_probabilities, inference_kwargs_from_config
+    inf = inference_kwargs_from_config(config)
+    if inf["postprocess"]:
+        from src.evaluation.postprocessing import (
+            postprocess_prediction, postprocess_kwargs_from_config,
+        )
+        pp_kwargs = postprocess_kwargs_from_config(config)
+
     post_pred = AsDiscrete(argmax=True, to_onehot=num_classes)
     post_label = AsDiscrete(to_onehot=num_classes)
 
@@ -46,7 +56,7 @@ def compute_case_metrics(
     hd_metric = HausdorffDistanceMetric(include_background=False, percentile=95, reduction="none")
 
     inverse_label_map = config["data"]["inverse_label_map"]
-    class_names = {1: "NCR", 2: "ED", 3: "ET"}
+    class_names = get_class_names(config)
 
     records = []
 
@@ -57,15 +67,25 @@ def compute_case_metrics(
             case_id = batch_data.get("case_id", ["unknown"])[0]
 
             with autocast(enabled=use_amp):
-                outputs = sliding_window_inference(
-                    images, spatial_size, sw_batch, inference_wrapper(model), overlap=sw_overlap
+                probs = predict_probabilities(
+                    model, images, spatial_size, sw_batch,
+                    overlap=inf["overlap"], mode=inf["mode"], tta=inf["tta"],
                 )
 
-            outputs_list = decollate_batch(outputs)
+            probs_list = decollate_batch(probs)
             labels_list = decollate_batch(labels)
 
-            pred_oh = post_pred(outputs_list[0])
             lab_oh = post_label(labels_list[0])
+
+            if inf["postprocess"]:
+                # argmax -> clean up -> one-hot (post-processing operates on labels)
+                pred_argmax_np = probs_list[0].argmax(dim=0).cpu().numpy()
+                cleaned = postprocess_prediction(pred_argmax_np, **pp_kwargs)
+                pred_lbl = torch.as_tensor(cleaned, device=lab_oh.device).unsqueeze(0)
+                pred_oh = AsDiscrete(to_onehot=num_classes)(pred_lbl)
+            else:
+                # probs are already softmaxed -> argmax+onehot is equivalent to before
+                pred_oh = post_pred(probs_list[0])
 
             # Per-class Dice
             dice_metric.reset()
@@ -118,7 +138,7 @@ def compute_case_metrics(
 def print_metrics_summary(df: pd.DataFrame, config: dict):
     """Print a rich summary table of evaluation metrics."""
     regions = config["evaluation"]["regions"]
-    class_names = ["NCR", "ED", "ET"]
+    class_names = list(get_class_names(config).values())
 
     # Per-class table
     table = Table(title="Per-Class Metrics", style="bold cyan")

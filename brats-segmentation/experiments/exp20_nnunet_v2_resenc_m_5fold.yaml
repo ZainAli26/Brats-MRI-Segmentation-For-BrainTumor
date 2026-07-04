@@ -1,0 +1,158 @@
+# Exp 20 — CUSTOM LOOP, TRUE nnU-Net v2 ResEnc-M architecture, 5-Fold CV (BraTS 2024)
+#
+# exp20 is a DERIVATION OF exp19. Everything (data, preprocessing/augmentation,
+# optimizer + schedule recipe, inference, postprocessing, evaluation) is copied
+# from exp19 verbatim. The ONE deliberate change is the ENCODER BLOCK STRUCTURE:
+#
+#     exp19 custom-bridge:  n_blocks_encoder = 2   -> uniform [2,2,2,2,2,2]  (~47.1M)
+#     exp20:                n_blocks_encoder = [1,3,4,6,6,6]  (true ResEnc)  (~102.4M)
+#
+# Why: exp19's train.py-path architecture used a uniform 2 blocks/stage, which is
+# NOT the real nnU-Net ResEnc layout. The genuine ResEnc encoder is asymmetric and
+# back-loaded ([1,3,4,6,6,6,...]); the decoder is lightweight ([1,1,1,1,1]). exp20
+# runs that TRUE architecture through OUR custom loop, with exp19's recipe held
+# fixed, so exp20 vs exp19(native) isolates the engine and exp20 carries the real
+# ResEnc-M block template.
+#
+# NOTE: this is the CUSTOM-LOOP experiment (model.name = "nnunet_v2", built by
+# src/models/factory.py). It does NOT go through the native nnU-Net pipeline, so
+# exp19's `native:` block is intentionally absent here. See exp19 for the native run.
+#
+# Launch (custom k-fold loop):
+#   python train_kfold.py --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml \
+#       --data_dir ../Brats2024/training_data1_v2
+
+data:
+  dataset: "brats2024"
+  train_dir: "../Brats2024/training_data1_v2"
+  val_dir: "../Brats2024/validation_data"
+  modalities: ["t1c", "t1n", "t2f", "t2w"]
+  num_classes: 5
+  label_map: {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
+  inverse_label_map: {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
+  class_names: {1: "NETC", 2: "SNFH", 3: "ET", 4: "RC"}
+  split_seed: 42                       # same seed/folds as exp18/exp19 -> identical partition
+  split_ratios: [0.75, 0.15, 0.10]     # used by the train.py path (e.g. overfit)
+  n_folds: 5
+  # Disk cache of the DETERMINISTIC transform prefix (load+resample+crop) via MONAI
+  # PersistentDataset. Without this, every epoch re-decompresses 4 .nii.gz + resamples
+  # per case -> GPU starves at 0% util waiting on disk (the cause of multi-min epochs).
+  # Epoch 1 populates the cache (slow); epochs 2+ are GPU-bound (~fast). Maps to
+  # ./.cache on the host via docker-compose. Use a distinct dir per experiment so a
+  # changed transform never reuses a stale cache.
+  cache_dir: "/app/.cache/persistent/exp20"
+
+# Patch set to the GENUINE ResEnc-M plan for THIS dataset, as emitted by
+# ResEncUNetPlanner(gpu_memory_target=8 GB) on Dataset102: patch [128,160,112],
+# nnU-Net's own batch_size=2 (we use 1 + grad_accum to fit the custom loop on 8 GB).
+preprocessing:
+  spatial_size: [128, 160, 112]
+  norm_method: "zscore_nonzero"
+  augmentation:
+    preset: "nnunet"          # full nnU-Net v2 augmentation set (affine, noise, blur, gamma, mirror)
+    crop_pos: 1               # foreground oversampling ~33% (pos:neg = 1:2), like nnU-Net
+    crop_neg: 2
+    # Legacy knobs kept so the overfit path (which zeroes every aug value) still runs:
+    random_flip_prob: 0.5
+    random_rotate_prob: 0.3
+    random_rotate_range: 0.5236
+    random_intensity_shift: 0.1
+    random_intensity_scale: 0.1
+
+model:
+  name: "nnunet_v2"
+  in_channels: 4
+  out_channels: 5
+  nnunet_v2:
+    variant: "residual"
+    kernel_sizes: [[3,3,3], [3,3,3], [3,3,3], [3,3,3], [3,3,3], [3,3,3]]
+    # Last stride is [2,2,1] (anisotropic): with Z patch=112 nnU-Net downsamples Z
+    # only 4x (num_pool_per_axis [5,5,4]). This is the genuine planned M topology.
+    strides:      [[1,1,1], [2,2,2], [2,2,2], [2,2,2], [2,2,2], [2,2,1]]
+    features_per_stage: [32, 64, 128, 256, 320, 320]
+    # ---- THE ONLY ARCHITECTURAL CHANGE vs exp19 ----------------------------------
+    # TRUE nnU-Net ResEnc block template (asymmetric, back-loaded deep encoder),
+    # enabled by the per-stage-list support added in src/models/factory.py.
+    n_blocks_encoder: [1, 3, 4, 6, 6, 6]   # ResEnc encoder: (1,3,4,6,6,6,...) truncated to 6 stages
+    n_blocks_decoder: [1, 1, 1, 1, 1]      # ResEnc decoder: 1 conv block per (n_stages-1) decoder stages
+    # ------------------------------------------------------------------------------
+    deep_supervision: true
+
+training:
+  # Same recipe as exp19 (nnU-Net v2's own: SGD+Nesterov, poly-LR, batch-Dice, deep
+  # supervision). Held fixed so exp20 differs from exp19 only by the engine
+  # (+ exp20 carries the true ResEnc block template).
+  # CAVEAT: a custom-loop "epoch" is a full pass over the dataset, NOT nnU-Net's fixed
+  # 250 iterations — so total compute/duration won't match even though techniques do.
+  epochs: 250
+  # nnU-Net-style fixed-iteration epochs: each epoch = 250 OPTIMIZER STEPS sampling
+  # patches with replacement (not one full pass). 250 iters x 250 epochs = 62,500
+  # steps -> a shared, dataset-size-independent budget close to nnU-Net's regime and
+  # feasible on 8 GB (full nnU-Net parity would be 250 x 1000 = 250k steps).
+  iters_per_epoch: 250
+  batch_size: 1
+  num_workers: 6
+  # nnU-Net-exact deep supervision (defaults, shown for the record): downsample the
+  # GT label to each head's resolution and zero the lowest-resolution head's weight.
+  ds_downsample_target: true
+  ds_zero_lowest: true
+
+  # ---- Optimizer / schedule (configurable) -------------------------------------
+  # DEFAULT = AdamW. SGD@1e-2 (nnU-Net's own LR) background-collapses in THIS loop at
+  # batch size 1, so AdamW is the robust default. To run the nnU-Net-pure SGD recipe
+  # instead, comment the AdamW block and uncomment the SGD block (warmup avoids collapse).
+  # ACTIVE = nnU-Net-pure SGD. exp20 is ~102M params, so AdamW state (~816 MB) would
+  # thrash the 8 GB GPU even harder than exp19 — SGD is effectively required here.
+  optimizer: "sgd"
+  learning_rate: 0.01
+  weight_decay: 0.00003         # 3e-5
+  momentum: 0.99
+  nesterov: true
+  scheduler: "poly"
+  poly_exponent: 0.9
+  warmup_epochs: 50             # linear LR warmup — prevents background collapse at batch 1
+  warmup_start_factor: 0.01
+  # --- AdamW alternative (uncomment these, comment the SGD block above): -----------
+  # optimizer: "adamw"
+  # learning_rate: 0.001        # AdamW LR (robust at batch 1)
+  # weight_decay: 0.00001       # 1e-5
+  # scheduler: "poly"           # monotonic poly decay (no cosine restart-to-zero)
+  # poly_exponent: 0.9
+  # warmup_epochs: 0            # AdamW needs no warmup
+  # NOTE: at ~102M params + 160x192x128 batch 1, AdamW will likely OOM/thrash 8 GB.
+  # ------------------------------------------------------------------------------
+
+  amp: true
+  grad_accum_steps: 2
+  val_interval: 10
+  early_stopping_patience: 1000  # effectively off — train the full schedule
+  loss: "dice_ce"
+  batch_dice: true              # pool Dice over the batch (helps small ET/NETC at batch>1)
+  dice_weight: 1.0
+  ce_weight: 1.0
+  sw_batch_size: 2
+  sw_overlap: 0.5
+
+# nnU-Net v2-style inference for the custom-loop path (src/evaluation/metrics.py).
+# Copied from exp19 -> identical pre/post-processing and inference.
+inference:
+  mode: "gaussian"     # Gaussian importance-weighted sliding window (nnU-Net default)
+  tta: true            # mirroring TTA: average softmax over axis flips (2^3 = 8 passes)
+  overlap: 0.5
+  postprocess: true    # connected-component cleanup + tiny-ET suppression + hole fill
+
+evaluation:
+  metrics: ["dice", "hausdorff95"]
+  regions:
+    ET: [3]
+    TC: [1, 3]
+    WT: [1, 2, 3]
+    RC: [4]            # Resection Cavity
+  failure_dice_threshold: 0.5
+  small_tumor_volume_threshold: 500
+  num_failure_cases: 10
+
+experiment:
+  output_dir: "./runs"
+  save_best_only: true
+  log_interval: 10

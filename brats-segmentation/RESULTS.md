@@ -189,6 +189,32 @@
 
 ---
 
+## Experiment 18 — nnU-Net v2 Residual Encoder (5-Fold) — TTA Study
+
+**Question:** Does flip-based Test-Time Augmentation (TTA) improve Dice at inference?
+
+Single fold (fold0) of the 5-fold residual-encoder run, evaluated on the `val_fold0`
+split (272 cases). TTA averages softmax probabilities over 8 flip augmentations
+(no-flip + all 7 combinations of the 3 spatial axes), at ~8× inference cost.
+Post-processing: ET<250vx→NCR, connected-component analysis ≥50vx, hole-filling.
+
+| Setting | Mean Region | Dice ET | Dice TC | Dice WT |
+|---------|-------------|---------|---------|---------|
+| Raw, no TTA | 0.6641 | 0.6053 | 0.6411 | 0.7461 |
+| Raw, **+TTA** | **0.6692** | **0.6101** | **0.6458** | **0.7518** |
+| Post-proc, no TTA | 0.6639 | 0.6052 | 0.6404 | 0.7460 |
+| Post-proc, **+TTA** | **0.6690** | **0.6096** | **0.6454** | **0.7518** |
+
+**Δ from TTA (post-proc):** ET +0.0044, TC +0.0051, WT +0.0058, **Mean +0.0051**
+
+**Findings:**
+1. **TTA gives a small but consistent gain** (~+0.005 mean region Dice) across all three regions, at ~8× inference cost.
+2. **Post-processing is essentially neutral here** — raw vs post-processed differ by <0.0003 mean Dice (slightly negative), in both the TTA and no-TTA runs.
+
+*Outputs: `eval_exp18_fold0/` (no TTA) and `eval_exp18_fold0_tta/` (TTA), each with `eval_summary.json`, `metrics_raw.csv`, `metrics_postprocessed.csv`.*
+
+---
+
 ## Comparative Summary
 
 ### Phase 1 — Model Comparison (Test Set, 129 Cases)

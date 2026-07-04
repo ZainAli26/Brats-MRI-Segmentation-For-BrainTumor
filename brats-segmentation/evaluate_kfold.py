@@ -45,10 +45,10 @@ from tqdm import tqdm
 
 from src.data.dataset import build_file_list
 from src.data.preprocessing import get_val_transforms
-from src.data.splits import create_kfold_splits
-from src.evaluation.postprocessing import postprocess_prediction
+from src.data.splits import create_kfold_splits, resolve_train_dirs
+from src.evaluation.postprocessing import postprocess_prediction, postprocess_kwargs_from_config
 from src.models.factory import create_model
-from src.utils import inference_wrapper
+from src.utils import inference_wrapper, get_class_names
 from src.utils.experiment import load_config
 
 console = Console()
@@ -149,6 +149,9 @@ def evaluate(
     """
     if postproc_kwargs is None:
         postproc_kwargs = {}
+    # Merge in label-dependent kwargs (ET label, WT/TC sets, foreground) so
+    # post-processing matches the run's class scheme (5-class 2024 vs 4-class 2023).
+    postproc_kwargs = {**postprocess_kwargs_from_config(config), **postproc_kwargs}
 
     num_classes = config["data"]["num_classes"]
     spatial_size = config["preprocessing"]["spatial_size"]
@@ -198,7 +201,7 @@ def evaluate(
         class_dice = dice_metric.aggregate().cpu().numpy().flatten()
 
         record = {"case_id": case_id}
-        for i, cname in enumerate(["NCR", "ED", "ET"]):
+        for i, cname in enumerate(get_class_names(config).values()):
             record[f"dice_{cname}"] = float(class_dice[i]) if i < len(class_dice) else np.nan
 
         # Per-region Dice + HD95
@@ -212,7 +215,7 @@ def evaluate(
 
 def print_summary(df: pd.DataFrame, label: str, config: dict):
     regions = list(config["evaluation"]["regions"].keys())
-    class_names = ["NCR", "ED", "ET"]
+    class_names = list(get_class_names(config).values())
 
     table = Table(title=f"[bold]{label}[/bold]", style="cyan")
     table.add_column("Region/Class", style="bold")
@@ -304,7 +307,8 @@ def main():
         console.print(f"[red]Data dir not found: {data_dir}[/red]")
         sys.exit(1)
 
-    folds = create_kfold_splits(str(data_dir), n_folds=n_folds, seed=config["data"]["split_seed"])
+    folds = create_kfold_splits(resolve_train_dirs(config["data"]), n_folds=n_folds,
+                                seed=config["data"]["split_seed"])
 
     if args.split == "all":
         # Every case in the dataset
@@ -362,7 +366,7 @@ def main():
 
     if not args.no_postproc:
         console.print(f"\n[bold]Pass 2 — With post-processing "
-                      f"(ET<{args.et_min_voxels}vx→NCR, CCA≥{args.min_component_size}vx, "
+                      f"(ET<{args.et_min_voxels}vx→core, CCA≥{args.min_component_size}vx, "
                       f"hole_fill={not args.no_fill_holes})[/bold]")
         df_pp = evaluate(models, eval_loader, config, device,
                          use_tta=args.tta, use_postproc=True,

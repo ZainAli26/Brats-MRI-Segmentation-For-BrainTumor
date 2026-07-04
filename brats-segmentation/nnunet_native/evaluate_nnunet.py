@@ -44,16 +44,17 @@ from src.utils.experiment import load_config
 
 console = Console()
 
-# Same label remap used during conversion
-LABEL_REMAP = {0: 0, 1: 1, 2: 2, 4: 3}
+# Same label remap used during conversion (identity for BraTS 2024 — already 0..4)
+LABEL_REMAP = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
 
-# Evaluation regions (using remapped labels)
+# Evaluation regions (BraTS 2024 post-treatment definitions)
 REGIONS = {
-    "ET": [3],
-    "TC": [1, 3],
-    "WT": [1, 2, 3],
+    "ET": [3],            # Enhancing Tissue
+    "TC": [1, 3],         # Tumor Core = NETC + ET
+    "WT": [1, 2, 3],      # Whole Tumor = NETC + SNFH + ET
+    "RC": [4],            # Resection Cavity
 }
-CLASS_NAMES = {1: "NCR", 2: "ED", 3: "ET"}
+CLASS_NAMES = {1: "NETC", 2: "SNFH", 3: "ET", 4: "RC"}
 
 
 def _dice(pred_mask, true_mask):
@@ -96,7 +97,15 @@ def evaluate_predictions(
     split_seed: int = 42,
     visualize: bool = True,
     config_path: str = None,
+    postprocessing_json: str = None,
 ):
+    # Optional nnU-Net-style post-processing ops (determined on OOF validation).
+    pp_ops = None
+    if postprocessing_json:
+        import json
+        with open(postprocessing_json) as f:
+            pp_ops = json.load(f).get("operations", [])
+        console.print(f"[cyan]Applying determined post-processing ops: {pp_ops}[/cyan]")
     pred_path = Path(pred_dir).expanduser().resolve()
     data_path = Path(data_dir).expanduser().resolve()
     output_path = Path(output_dir).expanduser().resolve()
@@ -129,6 +138,10 @@ def evaluate_predictions(
         # Load prediction (already remapped labels: 0,1,2,3)
         pred_img = nib.load(str(pred_file))
         pred_data = pred_img.get_fdata().astype(np.uint8)
+
+        if pp_ops:
+            from src.evaluation.nnunet_postprocessing import apply_postprocessing
+            pred_data = apply_postprocessing(pred_data, pp_ops)
 
         # Load ground truth
         case_dir = data_path / case_id
@@ -254,6 +267,7 @@ def evaluate_predictions(
                     mri_4ch, gt_data, pred_data, case_id,
                     str(viz_dir),
                     metrics={k: v for k, v in case_metrics.items() if k.startswith("dice_") and isinstance(v, float)},
+                    class_names=CLASS_NAMES,
                 )
                 console.print(f"  Saved: {path}")
 
@@ -281,6 +295,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", default="runs/nnunet_native_eval", help="Output directory for results")
     parser.add_argument("--config", help="Optional: path to project config.yaml for split params")
     parser.add_argument("--no_visualize", action="store_true", help="Skip generating visualizations")
+    parser.add_argument("--postprocessing_json", help="Apply determined nnU-Net post-processing ops")
     args = parser.parse_args()
 
     split_ratios = [0.75, 0.15, 0.10]
@@ -294,4 +309,5 @@ if __name__ == "__main__":
         args.pred_dir, args.data_dir, args.output_dir,
         split_ratios, split_seed,
         visualize=not args.no_visualize,
+        postprocessing_json=args.postprocessing_json,
     )

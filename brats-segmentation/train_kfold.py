@@ -25,7 +25,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from src.utils.experiment import load_config, ExperimentTracker
-from src.data.splits import create_kfold_splits
+from src.data.splits import create_kfold_splits, resolve_train_dirs
 from src.data.dataset import get_dataloaders
 from src.data.preprocessing import get_train_transforms, get_val_transforms
 from src.models.factory import create_model
@@ -80,7 +80,12 @@ def train_fold(config, fold_idx, train_cases, val_cases, args):
     train_transform = get_train_transforms(spatial_size, modalities, label_map, aug_config)
     val_transform = get_val_transforms(spatial_size, modalities, label_map)
 
-    # Create dataloaders (no test set in k-fold — all data used for train/val)
+    # Create dataloaders (no test set in k-fold — all data used for train/val).
+    # NOTE: the disk cache (data.cache_dir) is intentionally NOT used here. Each cached
+    # item is ~138 MB, and across folds every case is cached as both a train and a val
+    # sample (~1621 x 138 MB x 2 ~= 450 GB) — far more than the disk holds. The single-
+    # split train.py path is small enough to cache; k-fold is not. Throughput is instead
+    # tuned via num_workers / prefetch in get_dataloaders.
     dataloaders = get_dataloaders(
         train_cases, val_cases, [],  # empty test set
         modalities=modalities,
@@ -132,6 +137,9 @@ def main():
     parser.add_argument("--fold", type=int, default=None,
                         help="Train only this fold (0-indexed). Omit to train all folds.")
     parser.add_argument("--data_dir", type=str, help="Override data.train_dir in config")
+    parser.add_argument("--extra_data_dir", action="append", default=None,
+                        help="Override data.extra_train_dirs (pooled into the split). "
+                             "Repeat for multiple dirs. Use container paths under Docker.")
     parser.add_argument("--resume_dir", type=str,
                         help="Directory containing fold*/best_model.pth to resume from")
     parser.add_argument("--smoke_test", action="store_true",
@@ -143,6 +151,8 @@ def main():
     config = load_config(args.config)
     if args.data_dir:
         config["data"]["train_dir"] = args.data_dir
+    if args.extra_data_dir:
+        config["data"]["extra_train_dirs"] = args.extra_data_dir
     if args.smoke_test:
         config["training"]["epochs"] = 3
         config["training"]["val_interval"] = 2
@@ -168,8 +178,12 @@ def main():
         console.print(f"[red bold]Error: Data directory not found: {data_dir}[/red bold]")
         sys.exit(1)
 
-    # Create K-fold splits (patient-level)
-    folds = create_kfold_splits(str(data_dir), n_folds=n_folds, seed=config["data"]["split_seed"])
+    # Create K-fold splits (patient-level), pooling train_dir + any extra_train_dirs
+    data_sources = resolve_train_dirs(config["data"])
+    if len(data_sources) > 1:
+        console.print(f"[bold]Pooling {len(data_sources)} training sources:[/bold] "
+                      + ", ".join(data_sources))
+    folds = create_kfold_splits(data_sources, n_folds=n_folds, seed=config["data"]["split_seed"])
 
     # Determine which folds to train
     if args.fold is not None:

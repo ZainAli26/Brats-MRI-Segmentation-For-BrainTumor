@@ -1,0 +1,177 @@
+# Exp 19 — NATIVE nnU-Net v2 ResEnc-L, 5-Fold CV  (real-framework replica of exp18)
+#
+# Question: When we run the SAME comparison as exp18 (residual-encoder nnU-Net,
+#           5-fold patient-level CV, BraTS 2024) through the REAL nnU-Net v2
+#           framework — its own self-configured planning, preprocessing, trainer,
+#           augmentation, and sliding-window inference — how do the numbers compare
+#           to our custom training loop (exp18)?
+#
+# This is the engine swap, not a re-tune:
+#   * exp18  = ResidualEncoderUNet built via our factory + src/training/trainer.py
+#              + our fixed MONAI preprocessing/augmentation + our k-fold loop.
+#   * exp19  = nnUNetv2_plan_and_preprocess + nnUNetv2_train (nnUNetTrainer) +
+#              nnUNetv2 inference, using the ResEnc-L preset.
+#
+# HELD FIXED vs exp18 (so the comparison is fair):
+#   - Dataset:                  BraTS 2024 (training_data1_v2)
+#   - Architecture family:      residual-encoder U-Net
+#   - Cross-validation:         5-fold, PATIENT-LEVEL, split_seed=42
+#   - Label remap:              {0:0, 1:1, 2:2, 3:3, 4:4} (identity; 5-class 2024 scheme)
+#   - Evaluation regions:       ET / TC / WT, same metrics as every other exp
+#
+# LEAK CONTROL (data hygiene):
+#   - A test set (the SAME seed-42 10% patients as create_patient_splits) is HELD
+#     OUT in imagesTs and NEVER appears in any fold's train or val. The 5-fold CV
+#     runs on the train+val pool only. Two reported numbers:
+#       (a) out-of-fold validation Dice  -> the CV metric (pool only)
+#       (b) held-out test Dice (5-fold ensemble) -> fully leak-free, and directly
+#           comparable to the holdout native run + custom models on the same test set.
+#   - NOTE: this differs from exp18, which K-folds ALL data with no held-out test.
+#     exp19 trains on slightly less data per fold in exchange for an honest test set.
+#
+# LET nnU-Net DECIDE (the whole point of "real nnU-Net"):
+#   - Patch size, spacing, normalization, batch size  -> auto-planned
+#   - ResEnc block counts / stage depths               -> from ResEnc-L preset
+#   - Epochs (1000), LR schedule (poly), optimizer (SGD), augmentation -> nnU-Net defaults
+#   - Loss (Dice + CE, region-based), deep supervision -> nnU-Net defaults
+#
+# This experiment is NOT launched with train.py / train_kfold.py.
+# Run it with:  bash nnunet_native/run_resenc_5fold.sh --gpu 0
+# The fields below are consumed by the conversion + evaluation bridge ONLY; the
+# training hyperparameters are owned by nnU-Net and are shown here for the record,
+# annotated "(nnU-Net-planned, not enforced)".
+
+data:
+  dataset: "brats2024"
+  train_dir: "../Brats2024/training_data1_v2"
+  val_dir: "../Brats2024/validation_data"
+  modalities: ["t1c", "t1n", "t2f", "t2w"]
+  num_classes: 5
+  label_map: {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
+  inverse_label_map: {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
+  class_names: {1: "NETC", 2: "SNFH", 3: "ET", 4: "RC"}
+  split_seed: 42          # same seed/folds as exp18 -> identical patient partition
+  split_ratios: [0.75, 0.15, 0.10]   # used by the train.py path (e.g. overfit); the
+                                     # native k-fold runner uses n_folds + the held-out test
+  n_folds: 5
+  # Disk cache (MONAI PersistentDataset) for the train.py/overfit path — caches the
+  # deterministic transform prefix so epochs 2+ are GPU-bound, not I/O-bound (GPU 0%).
+  # Epoch 1 populates it. (The NATIVE nnU-Net pipeline does its own preprocessing and
+  # ignores this.) Distinct dir per experiment; clear if the transform changes.
+  cache_dir: "/app/.cache/persistent/exp19"
+
+# nnU-Net native framework settings (this is what makes exp19 != exp18).
+native:
+  dataset_id: 102                       # distinct from Phase-5 holdout dataset (101)
+  dataset_name: "BraTS2024ResEnc"
+  configuration: "3d_fullres"
+  planner: "nnUNetPlannerResEncL"       # ResEnc-L preset (24 GB+ GPU; author default)
+  plans_identifier: "nnUNetResEncUNetLPlans"
+  trainer: "nnUNetTrainer"              # stock 1000-epoch trainer
+  split_mode: "kfold"                   # train+val pool -> imagesTr (5 folds); test -> imagesTs
+  test_held_out: true                   # seed-42 10% patients never enter any training fold
+  save_softmax: true                    # --npz, enables fold ensembling for test prediction
+  evaluate_on: ["oof_validation", "held_out_test"]  # CV metric + leak-free test metric
+
+# Shown for the record. nnU-Net plans these itself from the dataset fingerprint;
+# we do NOT override them (see ExitPlanMode note above). Expect ResEnc-L to plan a
+# patch near 128x160x112 with batch_size 2 on a 24 GB GPU.
+# The NATIVE pipeline lets nnU-Net plan these from the dataset fingerprint (we do
+# NOT override them). The concrete values below are ONLY used by the train.py path
+# (e.g. the 50-MRI overfit sanity check) and mirror exp18 (same residual architecture).
+preprocessing:
+  spatial_size: [160, 192, 128]
+  norm_method: "zscore_nonzero"
+  augmentation:
+    preset: "nnunet"          # full nnU-Net v2 augmentation set (affine, noise, blur, gamma, mirror)
+    crop_pos: 1               # foreground oversampling ~33% (pos:neg = 1:2), like nnU-Net
+    crop_neg: 2
+    # Legacy knobs kept so the overfit path (which zeroes every aug value) still runs:
+    random_flip_prob: 0.5
+    random_rotate_prob: 0.3
+    random_rotate_range: 0.5236
+    random_intensity_shift: 0.1
+    random_intensity_scale: 0.1
+
+model:
+  name: "nnunet_v2_native_resenc"       # bridge tag; analyze_failures uses this label.
+                                        # train.py's factory treats any nnunet_v2* name
+                                        # as the nnU-Net v2 builder (residual variant here).
+  in_channels: 4
+  out_channels: 5
+  note: "ResidualEncoderUNet auto-configured by the ResEnc-L planner (native path)"
+  # Architecture used by the train.py path only (native path self-configures):
+  nnunet_v2:
+    variant: "residual"
+    kernel_sizes: [[3,3,3], [3,3,3], [3,3,3], [3,3,3], [3,3,3], [3,3,3]]
+    strides: [[1,1,1], [2,2,2], [2,2,2], [2,2,2], [2,2,2], [2,2,2]]
+    features_per_stage: [32, 64, 128, 256, 320, 320]
+    n_blocks_encoder: 2
+    n_blocks_decoder: 2
+    deep_supervision: true
+    grad_checkpointing: true   # custom-loop/overfit path ONLY (native nnU-Net ignores this
+                               # block). Recomputes encoder activations in backward so the
+                               # AdamW overfit + 160x192x128 patch fits 8 GB (~25% slower).
+
+training:
+  # NOTE: the NATIVE nnU-Net pipeline (nnunet_native/run_resenc_5fold.sh) still IGNORES
+  # this block — it owns its own trainer. The fields below now mirror nnU-Net v2's OWN
+  # recipe (SGD + Nesterov 0.99, poly-LR, batch-Dice, deep supervision) so the train.py
+  # path approximates nnU-Net rather than the old Adam/cosine loop that collapsed ET/TC.
+  # CAVEAT: a custom-loop "epoch" is a full pass over the dataset, NOT nnU-Net's fixed
+  # 250 iterations — so total compute/duration won't match even though the techniques do.
+  epochs: 250
+  batch_size: 1
+  num_workers: 6
+
+  # ---- Optimizer / schedule -----------------------------------------------------
+  # exp19 MIRRORS nnU-Net v2: SGD + Nesterov 0.99, poly-LR, warmup. (The NATIVE run owns
+  # its own trainer and ignores this block entirely; these fields document the recipe
+  # and drive the train.py path.) NOTE: SGD@1e-2 background-collapses at batch 1 in the
+  # custom loop — that's a custom-loop limitation, not nnU-Net's; the overfit sanity
+  # check therefore overrides this to AdamW (see generate_overfit_configs.py).
+  optimizer: "sgd"
+  learning_rate: 0.01
+  weight_decay: 0.00003         # 3e-5
+  momentum: 0.99
+  nesterov: true
+  scheduler: "poly"
+  poly_exponent: 0.9
+  warmup_epochs: 50             # linear LR warmup
+  warmup_start_factor: 0.01
+  # ------------------------------------------------------------------------------
+
+  amp: true
+  grad_accum_steps: 2
+  val_interval: 10
+  early_stopping_patience: 1000  # effectively off — train the full schedule
+  loss: "dice_ce"
+  batch_dice: true              # pool Dice over the batch (helps small ET/NETC at batch>1)
+  dice_weight: 1.0
+  ce_weight: 1.0
+  sw_batch_size: 2
+  sw_overlap: 0.5
+
+# nnU-Net v2-style inference for the custom-loop path (src/evaluation/metrics.py).
+# Absent on exp01-18 -> they keep constant weighting / no TTA / no post-processing.
+inference:
+  mode: "gaussian"     # Gaussian importance-weighted sliding window (nnU-Net default)
+  tta: true            # mirroring TTA: average softmax over axis flips (2^3 = 8 passes)
+  overlap: 0.5
+  postprocess: true    # connected-component cleanup + tiny-ET suppression + hole fill
+
+evaluation:
+  metrics: ["dice", "hausdorff95"]
+  regions:
+    ET: [3]
+    TC: [1, 3]
+    WT: [1, 2, 3]
+    RC: [4]            # Resection Cavity
+  failure_dice_threshold: 0.5
+  small_tumor_volume_threshold: 500
+  num_failure_cases: 10
+
+experiment:
+  output_dir: "./runs"
+  save_best_only: true
+  log_interval: 10

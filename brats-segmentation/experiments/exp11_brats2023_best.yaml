@@ -9,6 +9,7 @@ data:
   num_classes: 4
   label_map: {0: 0, 1: 1, 2: 2, 3: 3}
   inverse_label_map: {0: 0, 1: 1, 2: 2, 3: 3}
+  class_names: {1: "NCR", 2: "ED", 3: "ET"}
   split_ratios: [0.75, 0.15, 0.10]
   split_seed: 42
 

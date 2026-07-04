@@ -24,7 +24,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from src.utils.experiment import load_config
-from src.data.splits import create_patient_splits
+from src.data.splits import create_patient_splits, resolve_train_dirs
 from src.data.dataset import build_file_list
 from src.data.preprocessing import get_val_transforms
 from src.models.factory import create_model
@@ -110,9 +110,8 @@ def analyze_single_run(run_dir: Path, split: str = "test", case_ids: list = None
     if case_ids:
         console.print(f"\n[bold]Generating detailed views for {len(case_ids)} cases...[/bold]")
 
-        data_dir = Path(config["data"]["train_dir"]).expanduser()
         train_cases, val_cases, test_cases = create_patient_splits(
-            str(data_dir),
+            resolve_train_dirs(config["data"]),
             split_ratios=config["data"]["split_ratios"],
             seed=config["data"]["split_seed"],
         )

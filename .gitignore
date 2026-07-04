@@ -8,6 +8,7 @@
 # -----------------------------------------------------------------------------
 Brats2024/
 Brats2023/
+MICCAI_BraTS_2019_Data_Training/
 # Raw dataset archives (tens of GB) — download from Synapse, never commit.
 *.zip
 *.nii
@@ -124,3 +125,6 @@ Icon?
 *.tmp
 *.bak
 *.orig
+
+# Stray shell-redirect output file (e.g. `docker-compose run ... > out`)
+brats-segmentation/out

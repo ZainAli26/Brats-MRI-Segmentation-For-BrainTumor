@@ -122,6 +122,26 @@ for model in nnunet_v2 dynunet swin_unetr segresnet; do
 done
 ```
 
+### Overfit Sanity Check (50 MRIs)
+
+Before launching a full run, confirm a model + pipeline can actually memorize the
+data. Each experiment has a matching overfit config under `experiments/overfit/`
+that trains/validates/tests on the **same fixed 50 cases** with augmentation and
+early-stopping disabled. A healthy setup drives region Dice to ~1.0; a low plateau
+points to a real bug (labels, loss, class count, model wiring).
+
+```bash
+bash experiments/run_overfit.sh 1        # overfit exp01
+bash experiments/run_overfit.sh 18       # overfit exp18
+bash experiments/run_overfit.sh all      # every experiment, in order
+
+# Regenerate the overfit configs after editing the base experiments:
+python experiments/generate_overfit_configs.py
+```
+
+Overfit runs are written to `runs/overfit/`. The behaviour is driven by a
+`data.overfit: {enabled: true, num_cases: 50}` block that `train.py` honours.
+
 ## Configuration Reference
 
 All settings live in `configs/config.yaml`. Key parameters:
@@ -131,8 +151,17 @@ All settings live in `configs/config.yaml`. Key parameters:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `data.train_dir` | `../Brats2024/training_data1_v2` | Path to training cases |
+| `data.num_classes` | `5` (2024) / `4` (2023) | Background + foreground tumor classes |
+| `data.class_names` | `{1: NETC, 2: SNFH, 3: ET, 4: RC}` | Foreground label names (drives metrics/legends) |
+| `data.label_map` | identity | Maps raw seg labels → training labels |
 | `data.split_ratios` | `[0.75, 0.15, 0.10]` | Train/val/test split (patient-level) |
 | `data.split_seed` | `42` | Random seed for reproducible splits |
+
+**Label schemes.** BraTS 2024 (default) is the 5-class *post-treatment* scheme:
+`0=background, 1=NETC, 2=SNFH, 3=ET, 4=RC` (resection cavity). BraTS 2023 is the
+4-class pre-treatment scheme: `0=background, 1=NCR, 2=ED, 3=ET` (no RC). The data
+is already contiguous in both, so `label_map` is the identity. Evaluation regions
+(2024): `ET=[3]`, `TC=[1,3]`, `WT=[1,2,3]`, `RC=[4]`.
 
 ### Preprocessing (Identical Across All Models)
 

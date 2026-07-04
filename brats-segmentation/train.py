@@ -19,7 +19,7 @@ torch.set_float32_matmul_precision("high")
 from rich.panel import Panel
 
 from src.utils.experiment import load_config, ExperimentTracker
-from src.data.splits import create_patient_splits
+from src.data.splits import create_patient_splits, resolve_train_dirs
 from src.data.dataset import get_dataloaders
 from src.data.preprocessing import get_train_transforms, get_val_transforms
 from src.models.factory import create_model
@@ -38,6 +38,9 @@ def main():
     parser.add_argument("--batch_size", type=int, help="Override batch size")
     parser.add_argument("--lr", type=float, help="Override learning rate")
     parser.add_argument("--data_dir", type=str, help="Override data.train_dir in config")
+    parser.add_argument("--extra_data_dir", action="append", default=None,
+                        help="Override data.extra_train_dirs (pooled into the split). "
+                             "Repeat for multiple dirs. Use container paths under Docker.")
     parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from")
     args = parser.parse_args()
 
@@ -55,6 +58,8 @@ def main():
         config["training"]["learning_rate"] = args.lr
     if args.data_dir:
         config["data"]["train_dir"] = args.data_dir
+    if args.extra_data_dir:
+        config["data"]["extra_train_dirs"] = args.extra_data_dir
 
     # Banner
     console.print(Panel.fit(
@@ -79,13 +84,41 @@ def main():
         resume_dir = str(Path(args.resume).expanduser().parent)
     tracker = ExperimentTracker(config, config_path=args.config, resume_dir=resume_dir)
 
-    # Patient-level splits
+    # Patient-level splits (pool train_dir + any extra_train_dirs first)
+    data_sources = resolve_train_dirs(config["data"])
+    if len(data_sources) > 1:
+        console.print(f"\n[bold]Pooling {len(data_sources)} training sources:[/bold]")
+        for d in data_sources:
+            console.print(f"  • {d}")
     console.print("\n[bold]Creating patient-level data splits...[/bold]")
     train_cases, val_cases, test_cases = create_patient_splits(
-        str(data_dir),
+        data_sources,
         split_ratios=config["data"]["split_ratios"],
         seed=config["data"]["split_seed"],
     )
+
+    # Overfit sanity-check mode: train + validate + test on the SAME small fixed
+    # subset, so we can confirm a model/pipeline can actually memorize the data
+    # (region Dice -> ~1.0). Augmentation and early stopping are disabled so the
+    # model is free to fit the patches and runs the full epoch budget.
+    overfit_cfg = config["data"].get("overfit") or {}
+    if overfit_cfg.get("enabled"):
+        n = int(overfit_cfg.get("num_cases", 50))
+        subset = sorted(train_cases, key=lambda p: p.name)[:n]
+        if len(subset) < n:
+            console.print(f"[yellow]Only {len(subset)} cases available for overfit (requested {n})[/yellow]")
+        train_cases = val_cases = test_cases = subset
+        # Disable augmentation (zero out every probability / magnitude knob).
+        for k in list(config["preprocessing"]["augmentation"].keys()):
+            config["preprocessing"]["augmentation"][k] = 0
+        # Disable early stopping so the full epoch budget runs.
+        config["training"]["early_stopping_patience"] = config["training"]["epochs"] + 1
+        console.print(Panel.fit(
+            f"[bold yellow]OVERFIT MODE[/bold yellow]\n"
+            f"[dim]{len(subset)} cases | train = val = test | augmentation OFF | "
+            f"early-stopping OFF[/dim]",
+            border_style="yellow",
+        ))
 
     # Build transforms (identical preprocessing for all models)
     console.print("\n[bold]Building preprocessing pipeline...[/bold]")

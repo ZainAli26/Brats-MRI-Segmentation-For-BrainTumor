@@ -7,10 +7,11 @@ Generates one rich PNG per case showing:
   • 3D surface mesh of each tumour compartment (marching cubes)
   • Per-case Dice bar chart (ET / TC / WT)
 
-Colour scheme
-  NCR (class 1) — Red      #FF4444   (necrotic / non-enhancing core)
-  ED  (class 2) — Gold     #FFD700   (peritumoral oedema)
-  ET  (class 3) — Cyan     #00CFFF   (enhancing tumour)
+Colour scheme (BraTS 2024 post-treatment 5-class scheme)
+  NETC (class 1) — Red     #FF4545   (non-enhancing tumour core)
+  SNFH (class 2) — Gold    #FFD700   (surrounding FLAIR hyperintensity)
+  ET   (class 3) — Cyan    #00CFFF   (enhancing tissue)
+  RC   (class 4) — Purple  #A659F2   (resection cavity)
 
 Usage
 -----
@@ -71,7 +72,7 @@ from tqdm import tqdm
 
 from src.data.dataset import build_file_list
 from src.data.preprocessing import get_val_transforms
-from src.data.splits import create_kfold_splits, create_patient_splits
+from src.data.splits import create_kfold_splits, create_patient_splits, resolve_train_dirs
 from src.evaluation.postprocessing import postprocess_prediction
 from src.models.factory import create_model
 from src.utils import inference_wrapper
@@ -84,15 +85,18 @@ console = Console()
 DARK_BG   = "#0d1117"
 TEXT_CLR  = "#e6edf3"
 
-# RGBA float tuples used for overlay compositing
+# RGBA float tuples used for overlay compositing.
+# BraTS 2024 post-treatment scheme: 1=NETC, 2=SNFH, 3=ET, 4=RC.
 SEG_COLORS = {
-    1: np.array([1.0,  0.27, 0.27, 0.70]),   # NCR  — red
-    2: np.array([1.0,  0.84, 0.0,  0.65]),   # ED   — gold
+    1: np.array([1.0,  0.27, 0.27, 0.70]),   # NETC — red
+    2: np.array([1.0,  0.84, 0.0,  0.65]),   # SNFH — gold
     3: np.array([0.0,  0.81, 1.0,  0.70]),   # ET   — cyan
+    4: np.array([0.65, 0.35, 0.95, 0.70]),   # RC   — purple
 }
 # Hex strings for 3-D surface and legend
-HEX_COLORS = {1: "#FF4545", 2: "#FFD700", 3: "#00CFFF"}
-LABEL_NAMES = {1: "NCR (necrotic core)", 2: "ED (oedema)", 3: "ET (enhancing)"}
+HEX_COLORS = {1: "#FF4545", 2: "#FFD700", 3: "#00CFFF", 4: "#A659F2"}
+LABEL_NAMES = {1: "NETC (non-enhancing core)", 2: "SNFH (FLAIR hyperintensity)",
+               3: "ET (enhancing tissue)", 4: "RC (resection cavity)"}
 
 
 # ── MRI helpers ───────────────────────────────────────────────────────────────
@@ -157,7 +161,7 @@ def _render_3d(ax3d, seg: np.ndarray, title: str, downsample: int = 80):
     seg_small = np.round(seg_small).astype(np.int32)
 
     any_surface = False
-    for cls in [2, 1, 3]:   # render ED first (largest), then NCR, ET on top
+    for cls in [2, 4, 1, 3]:   # render SNFH (largest), RC, then NETC, ET on top
         mask = (seg_small == cls).astype(np.float32)
         if mask.sum() < 8:
             continue
@@ -250,7 +254,7 @@ def _case_dice(pred: np.ndarray, lab: np.ndarray, regions: dict) -> dict:
         results[region_name] = (2 * inter / (union + 1e-7)).item()
 
     # Per-class
-    for cls, name in [(1, "NCR"), (2, "ED"), (3, "ET_cls")]:
+    for cls, name in [(1, "NETC"), (2, "SNFH"), (3, "ET_cls"), (4, "RC")]:
         inter = ((pred == cls) & (lab == cls)).sum()
         union = (pred == cls).sum() + (lab == cls).sum()
         results[name] = float(2 * inter / max(union, 1))
@@ -401,11 +405,12 @@ def _make_figure(
 
         # Legend + region explanation
         legend_handles = [
-            Patch(color=HEX_COLORS[3], label="ET  — Enhancing Tumour"),
-            Patch(color="#FF9900",      label="TC  — Tumour Core  (NCR + ET)"),
-            Patch(color="#AAAAAA",      label="WT  — Whole Tumour (NCR + ED + ET)"),
-            Patch(color=HEX_COLORS[1], label="NCR — Necrotic Core"),
-            Patch(color=HEX_COLORS[2], label="ED  — Peritumoral Oedema"),
+            Patch(color=HEX_COLORS[3], label="ET  — Enhancing Tissue"),
+            Patch(color="#FF9900",      label="TC  — Tumour Core  (NETC + ET)"),
+            Patch(color="#AAAAAA",      label="WT  — Whole Tumour (NETC + SNFH + ET)"),
+            Patch(color=HEX_COLORS[1], label="NETC — Non-Enhancing Core"),
+            Patch(color=HEX_COLORS[2], label="SNFH — FLAIR Hyperintensity"),
+            Patch(color=HEX_COLORS[4], label="RC  — Resection Cavity"),
         ]
         ax_legend.legend(
             handles=legend_handles, loc="center",
@@ -426,12 +431,13 @@ def _make_figure(
     # ── Static legend (when no 3-D panel) ─────────────────────────────────────
     if not with_3d:
         legend_handles = [
-            Patch(color=HEX_COLORS[1], alpha=0.85, label="NCR"),
-            Patch(color=HEX_COLORS[2], alpha=0.85, label="ED"),
+            Patch(color=HEX_COLORS[1], alpha=0.85, label="NETC"),
+            Patch(color=HEX_COLORS[2], alpha=0.85, label="SNFH"),
             Patch(color=HEX_COLORS[3], alpha=0.85, label="ET"),
+            Patch(color=HEX_COLORS[4], alpha=0.85, label="RC"),
         ]
         fig.legend(
-            handles=legend_handles, loc="lower center", ncol=3,
+            handles=legend_handles, loc="lower center", ncol=4,
             fontsize=9, facecolor=DARK_BG, edgecolor="#30363d",
             labelcolor=TEXT_CLR, framealpha=0.9,
         )
@@ -586,9 +592,10 @@ def main():
         console.print(f"[red]Data dir not found: {data_dir}[/red]")
         sys.exit(1)
 
-    # Pre-build k-fold splits (used for val_foldX splits)
+    # Pre-build k-fold splits (used for val_foldX splits); pool any extra_train_dirs
+    data_sources = resolve_train_dirs(config["data"])
     kfold_splits = create_kfold_splits(
-        str(data_dir), n_folds=n_folds, seed=config["data"]["split_seed"]
+        data_sources, n_folds=n_folds, seed=config["data"]["split_seed"]
     )
 
     # Load models once (shared across splits)
@@ -615,7 +622,7 @@ def main():
         # Resolve cases for this split
         if split == "test":
             _, _, eval_cases = create_patient_splits(
-                str(data_dir),
+                data_sources,
                 split_ratios=[0.75, 0.15, 0.10],
                 seed=config["data"]["split_seed"],
             )

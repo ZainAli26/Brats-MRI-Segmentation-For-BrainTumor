@@ -1,5 +1,10 @@
 # Exp 7.2 — Train BraTS 2023, generalize to BraTS 2024
 # Question: Baseline performance of SegResNet (BraTS challenge winner arch)
+#
+# CROSS-DATASET CAVEAT: trained on the 2023 4-class scheme (NCR/ED/ET) but the 2024
+# test set is 5-class (adds RC, resection cavity). A 4-class model cannot predict RC
+# at all, so RC voxels in the 2024 ground truth are never recovered; only ET/TC/WT
+# are comparable. Kept at 4 classes deliberately (matches the training data).
 
 data:
   dataset: "brats2023"
@@ -9,6 +14,7 @@ data:
   num_classes: 4
   label_map: {0: 0, 1: 1, 2: 2, 3: 3}
   inverse_label_map: {0: 0, 1: 1, 2: 2, 3: 3}
+  class_names: {1: "NCR", 2: "ED", 3: "ET"}
   split_ratios: [0.75, 0.15, 0.10]
   split_seed: 42
 

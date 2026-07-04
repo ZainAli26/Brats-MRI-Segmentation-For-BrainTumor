@@ -21,21 +21,28 @@ from matplotlib.patches import Patch
 import seaborn as sns
 import torch
 from monai.inferers import sliding_window_inference
-from src.utils import inference_wrapper
+from src.utils import inference_wrapper, get_class_names, get_label_colors
 from monai.transforms import AsDiscrete
 from torch.cuda.amp import autocast
 from rich.console import Console
 
 console = Console()
 
-# Color map for tumor labels (remapped: 1=NCR, 2=ED, 3=ET)
-LABEL_COLORS = {
-    1: [1.0, 0.0, 0.0, 0.6],   # NCR - red
-    2: [0.0, 1.0, 0.0, 0.6],   # ED - green
-    3: [0.0, 0.3, 1.0, 0.6],   # ET - blue
-}
+# Default color map for tumor labels (config-aware via get_label_colors()).
+# 2024: 1=NETC, 2=SNFH, 3=ET, 4=RC. 2023: 1=NCR, 2=ED, 3=ET.
+LABEL_COLORS = get_label_colors()
 
 DARK_BG = "#1a1a2e"
+
+
+def _legend_patches(class_names: dict):
+    """Build matplotlib legend patches for the foreground classes."""
+    colors = get_label_colors()
+    return [
+        Patch(facecolor=tuple(colors.get(idx, [0.5, 0.5, 0.5, 0.6])[:3]), alpha=0.7,
+              label=f"{name} ({idx})")
+        for idx, name in sorted(class_names.items())
+    ]
 
 
 def _normalize_slice(s: np.ndarray) -> np.ndarray:
@@ -81,6 +88,7 @@ def visualize_case_comparison(
     output_dir: str,
     modality_idx: int = 0,
     metrics: Optional[dict] = None,
+    class_names: Optional[dict] = None,
 ) -> Path:
     """Visualize ground truth vs prediction for a single case.
 
@@ -136,12 +144,8 @@ def visualize_case_comparison(
         title += f"\n{metric_str}"
     fig.suptitle(title, color="white", fontsize=13, fontweight="bold")
 
-    legend_elements = [
-        Patch(facecolor="red", alpha=0.6, label="NCR (1)"),
-        Patch(facecolor="green", alpha=0.6, label="Edema (2)"),
-        Patch(facecolor=(0, 0.3, 1), alpha=0.6, label="ET (4)"),
-    ]
-    fig.legend(handles=legend_elements, loc="lower center", ncol=3,
+    legend_elements = _legend_patches(class_names or get_class_names(None))
+    fig.legend(handles=legend_elements, loc="lower center", ncol=len(legend_elements),
                fontsize=9, facecolor=DARK_BG, edgecolor="white",
                labelcolor="white", framealpha=0.8)
 
@@ -247,12 +251,8 @@ def visualize_failure_grid(
         ax.set_title(col_titles[2], color="white", fontsize=9)
         ax.axis("off")
 
-    legend_elements = [
-        Patch(facecolor="red", alpha=0.6, label="NCR (1)"),
-        Patch(facecolor="green", alpha=0.6, label="Edema (2)"),
-        Patch(facecolor=(0, 0.3, 1), alpha=0.6, label="ET (4)"),
-    ]
-    fig.legend(handles=legend_elements, loc="lower center", ncol=3,
+    legend_elements = _legend_patches(get_class_names(config))
+    fig.legend(handles=legend_elements, loc="lower center", ncol=len(legend_elements),
                fontsize=9, facecolor=DARK_BG, edgecolor="white",
                labelcolor="white", framealpha=0.8)
 
