@@ -70,7 +70,11 @@ def remap_and_save_label(src_path: Path, dst_path: Path):
     remapped = np.zeros_like(data)
     for src_label, dst_label in LABEL_REMAP.items():
         remapped[data == src_label] = dst_label
-    out = nib.Nifti1Image(remapped, img.affine, img.header)
+    # Fresh header forced to uint8: reusing img.header carries the source's
+    # datatype/bitpix (uint16/float64/float32), which nibabel and SimpleITK can then
+    # disagree on -> label bytes get misread as garbage (fails dataset integrity).
+    out = nib.Nifti1Image(remapped, img.affine)
+    out.header.set_data_dtype(np.uint8)
     nib.save(out, str(dst_path))
 
 
