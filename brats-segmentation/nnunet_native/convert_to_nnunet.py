@@ -27,6 +27,7 @@ Usage:
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -63,6 +64,32 @@ DATASET_LABELS = {"background": 0, "NETC": 1, "SNFH": 2, "ET": 3, "RC": 4}
 REGIONS_CLASS_ORDER = [1, 2, 3, 4]
 
 
+def _resolve_data_dirs(data_dir):
+    """Normalize a single dir or list of dirs into a list of resolved str paths."""
+    dirs = data_dir if isinstance(data_dir, (list, tuple)) else [data_dir]
+    return [str(Path(d).expanduser().resolve()) for d in dirs]
+
+
+def _link_file(src: Path, dst: Path):
+    """Materialize ``src`` at ``dst`` without duplicating data when possible.
+
+    Prefers a symlink (Linux/macOS). On Windows, ``os.symlink`` needs admin or
+    Developer Mode, so fall back to a hardlink (works on NTFS with no special
+    privilege and copies no data blocks), and finally to a plain copy if source
+    and destination live on different volumes. Idempotent.
+    """
+    if dst.exists():
+        return
+    src = src.resolve()
+    for linker in (os.symlink, os.link):
+        try:
+            linker(str(src), str(dst))
+            return
+        except (OSError, NotImplementedError, AttributeError):
+            continue
+    shutil.copy2(str(src), str(dst))
+
+
 def remap_and_save_label(src_path: Path, dst_path: Path):
     """Load segmentation, remap labels to contiguous, and save."""
     img = nib.load(str(src_path))
@@ -89,8 +116,7 @@ def _link_case_images(case_dir: Path, images_dir: Path) -> bool:
             console.print(f"[yellow]Missing {mod_suffix} for {case_dir.name}, skipping[/yellow]")
             return False
         dst = images_dir / f"{case_dir.name}_{channel_idx}.nii.gz"
-        if not dst.exists():
-            os.symlink(str(src[0].resolve()), str(dst))
+        _link_file(src[0], dst)
     return True
 
 
@@ -111,7 +137,10 @@ def convert_dataset_kfold(
     via splits_final.json. The 5-fold out-of-fold validation predictions give the CV
     metric; the held-out test set is for final (leak-free) evaluation.
     """
-    data_path = Path(data_dir).expanduser().resolve()
+    # data_dir may be one directory or several to pool (main + additional
+    # BraTS releases). _collect_case_dirs (via create_kfold_splits_with_test)
+    # accepts a list and de-duplicates by case name before splitting.
+    data_paths = _resolve_data_dirs(data_dir)
     base_dir = Path(output_dir).expanduser().resolve()
 
     raw_dir = base_dir / "nnUNet_raw" / f"Dataset{dataset_id:03d}_{dataset_name}"
@@ -126,7 +155,7 @@ def convert_dataset_kfold(
 
     # K-fold over the train+val pool, with the test set held out of every fold.
     folds, test_cases = create_kfold_splits_with_test(
-        str(data_path), n_folds=n_folds, seed=split_seed, split_ratios=split_ratios
+        data_paths, n_folds=n_folds, seed=split_seed, split_ratios=split_ratios
     )
     test_case_set = {c.name for c in test_cases}
 
@@ -205,7 +234,7 @@ def convert_dataset(
     split_ratios: list = [0.75, 0.15, 0.10],
     split_seed: int = 42,
 ):
-    data_path = Path(data_dir).expanduser().resolve()
+    data_paths = _resolve_data_dirs(data_dir)
     base_dir = Path(output_dir).expanduser().resolve()
 
     raw_dir = base_dir / "nnUNet_raw" / f"Dataset{dataset_id:03d}_{dataset_name}"
@@ -221,7 +250,7 @@ def convert_dataset(
 
     # Get patient-level splits (same seed as our custom pipeline)
     train_cases, val_cases, test_cases = create_patient_splits(
-        str(data_path), split_ratios, split_seed
+        data_paths, split_ratios, split_seed
     )
 
     # nnU-Net uses all labeled data for training with its own cross-validation.
@@ -243,8 +272,7 @@ def convert_dataset(
                 console.print(f"[yellow]Missing {mod_suffix} for {case_id}, skipping[/yellow]")
                 break
             dst = images_tr / f"{case_id}_{channel_idx}.nii.gz"
-            if not dst.exists():
-                os.symlink(str(src[0].resolve()), str(dst))
+            _link_file(src[0], dst)
         else:
             # Remap and save label
             seg_src = list(case_dir.glob("*-seg.nii.gz"))
@@ -263,8 +291,7 @@ def convert_dataset(
             if not src:
                 break
             dst = images_ts / f"{case_id}_{channel_idx}.nii.gz"
-            if not dst.exists():
-                os.symlink(str(src[0].resolve()), str(dst))
+            _link_file(src[0], dst)
 
     # --- dataset.json ---
     dataset_json = {
@@ -319,7 +346,9 @@ def convert_dataset(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert BraTS data to nnU-Net v2 format")
-    parser.add_argument("--data_dir", default="../Brats2024/training_data1_v2", help="BraTS data directory")
+    parser.add_argument("--data_dir", nargs="+", default=["../Brats2024/training_data1_v2"],
+                        help="BraTS data directory (or several, space-separated, to pool "
+                             "e.g. main + additional training releases before splitting)")
     parser.add_argument("--output_dir", default="./nnunet_data", help="nnU-Net output base directory")
     parser.add_argument("--dataset_id", type=int, default=101, help="nnU-Net dataset ID")
     parser.add_argument("--dataset_name", default="BraTS2024", help="nnU-Net dataset name")

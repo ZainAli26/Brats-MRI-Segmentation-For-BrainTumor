@@ -107,19 +107,24 @@ def evaluate_predictions(
             pp_ops = json.load(f).get("operations", [])
         console.print(f"[cyan]Applying determined post-processing ops: {pp_ops}[/cyan]")
     pred_path = Path(pred_dir).expanduser().resolve()
-    data_path = Path(data_dir).expanduser().resolve()
+    # Pool one or several source dirs, exactly as conversion did, so the
+    # seed-based patient split (and thus the held-out test set) is identical.
+    data_dirs = data_dir if isinstance(data_dir, (list, tuple)) else [data_dir]
+    data_paths = [str(Path(d).expanduser().resolve()) for d in data_dirs]
     output_path = Path(output_dir).expanduser().resolve()
     output_path.mkdir(parents=True, exist_ok=True)
 
     console.print(Panel.fit(
         "[bold cyan]nnU-Net v2 Native Evaluation[/bold cyan]\n"
-        f"[dim]Predictions: {pred_path}\nGround truth: {data_path}[/dim]",
+        f"[dim]Predictions: {pred_path}\nGround truth: {data_paths}[/dim]",
         border_style="bright_blue"
     ))
 
     # Get test split (same as used in conversion)
-    _, _, test_cases = create_patient_splits(str(data_path), split_ratios, split_seed)
+    _, _, test_cases = create_patient_splits(data_paths, split_ratios, split_seed)
     test_ids = {c.name for c in test_cases}
+    # Map case id -> its real source dir (may live in any of the pooled dirs).
+    case_dir_by_id = {c.name: c for c in test_cases}
 
     # Find prediction files
     pred_files = sorted(pred_path.glob("*.nii.gz"))
@@ -144,8 +149,8 @@ def evaluate_predictions(
             pred_data = apply_postprocessing(pred_data, pp_ops)
 
         # Load ground truth
-        case_dir = data_path / case_id
-        if not case_dir.exists():
+        case_dir = case_dir_by_id.get(case_id)
+        if case_dir is None or not case_dir.exists():
             console.print(f"[yellow]Ground truth dir not found for {case_id}, skipping[/yellow]")
             continue
 
@@ -275,7 +280,7 @@ def evaluate_predictions(
     import yaml
     fake_config = {
         "model": {"name": "nnunet_v2_native"},
-        "data": {"train_dir": str(data_path), "split_ratios": split_ratios, "split_seed": split_seed},
+        "data": {"train_dir": data_paths, "split_ratios": split_ratios, "split_seed": split_seed},
         "evaluation": eval_config["evaluation"],
     }
     with open(output_path / "config.yaml", "w") as f:
@@ -291,7 +296,9 @@ def evaluate_predictions(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate native nnU-Net v2 predictions")
     parser.add_argument("--pred_dir", required=True, help="Directory with nnU-Net prediction NIfTIs")
-    parser.add_argument("--data_dir", default="../Brats2024/training_data1_v2", help="Original BraTS data directory")
+    parser.add_argument("--data_dir", nargs="+", default=["../Brats2024/training_data1_v2"],
+                        help="Original BraTS data dir(s). Pass the SAME dir(s) used for "
+                             "conversion so the seed-based test split matches.")
     parser.add_argument("--output_dir", default="runs/nnunet_native_eval", help="Output directory for results")
     parser.add_argument("--config", help="Optional: path to project config.yaml for split params")
     parser.add_argument("--no_visualize", action="store_true", help="Skip generating visualizations")

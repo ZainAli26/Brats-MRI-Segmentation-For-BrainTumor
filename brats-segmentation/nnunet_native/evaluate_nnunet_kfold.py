@@ -95,22 +95,28 @@ def _collect_fold_predictions(results_dir: Path, n_folds: int):
     return preds
 
 
-def _gt_path(data_path: Path, case_id: str):
-    case_dir = data_path / case_id
-    segs = list(case_dir.glob("*-seg.nii.gz")) if case_dir.exists() else []
-    return segs[0] if segs else None
+def _gt_path(data_paths, case_id: str):
+    """Locate a case's seg across one or several pooled source dirs."""
+    for dp in data_paths:
+        case_dir = Path(dp) / case_id
+        segs = list(case_dir.glob("*-seg.nii.gz")) if case_dir.exists() else []
+        if segs:
+            return segs[0]
+    return None
 
 
 def evaluate_kfold(results_dir, data_dir, output_dir, n_folds=5, visualize=True,
                    postprocess=False, postprocessing_json=None):
     results_path = Path(results_dir).expanduser().resolve()
-    data_path = Path(data_dir).expanduser().resolve()
+    # Pool one or several source dirs, exactly as conversion did.
+    data_dirs = data_dir if isinstance(data_dir, (list, tuple)) else [data_dir]
+    data_paths = [str(Path(d).expanduser().resolve()) for d in data_dirs]
     output_path = Path(output_dir).expanduser().resolve()
     output_path.mkdir(parents=True, exist_ok=True)
 
     console.print(Panel.fit(
         "[bold cyan]Exp 19 — Native nnU-Net v2 ResEnc 5-fold OOF Evaluation[/bold cyan]\n"
-        f"[dim]Results:      {results_path}\nGround truth: {data_path}[/dim]",
+        f"[dim]Results:      {results_path}\nGround truth: {data_paths}[/dim]",
         border_style="bright_blue",
     ))
 
@@ -133,7 +139,7 @@ def evaluate_kfold(results_dir, data_dir, output_dir, n_folds=5, visualize=True,
         # build (pred_path, gt_path) items over cases that have GT
         items = []
         for case_id, pred_file, _ in preds:
-            gp = _gt_path(data_path, case_id)
+            gp = _gt_path(data_paths, case_id)
             if gp is not None:
                 items.append((pred_file, gp))
         # infer scheme from the data (BraTS 2024 -> 5 classes)
@@ -172,8 +178,8 @@ def evaluate_kfold(results_dir, data_dir, output_dir, n_folds=5, visualize=True,
         if pp_ops:
             pred_data = apply_postprocessing(pred_data, pp_ops)
 
-        case_dir = data_path / case_id
-        seg_files = list(case_dir.glob("*-seg.nii.gz")) if case_dir.exists() else []
+        seg_file = _gt_path(data_paths, case_id)
+        seg_files = [seg_file] if seg_file is not None else []
         if not seg_files:
             console.print(f"[yellow]No ground truth for {case_id}, skipping[/yellow]")
             continue
@@ -252,7 +258,7 @@ def evaluate_kfold(results_dir, data_dir, output_dir, n_folds=5, visualize=True,
     # --- config.yaml so analyze_failures.py can load this as a run ---
     fake_config = {
         "model": {"name": "nnunet_v2_native_resenc"},
-        "data": {"train_dir": str(data_path), "n_folds": n_folds, "split_seed": 42},
+        "data": {"train_dir": data_paths, "n_folds": n_folds, "split_seed": 42},
         "native": {"results_dir": str(results_path), "evaluate_on": "oof_validation"},
         "evaluation": eval_config["evaluation"],
     }
@@ -269,8 +275,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate native nnU-Net 5-fold OOF predictions")
     parser.add_argument("--results_dir", required=True,
                         help="nnU-Net trainer output dir (…__PLANS__CONFIG) containing fold_*/validation/")
-    parser.add_argument("--data_dir", default="../Brats2024/training_data1_v2",
-                        help="Original BraTS data directory (for ground truth)")
+    parser.add_argument("--data_dir", nargs="+", default=["../Brats2024/training_data1_v2"],
+                        help="Original BraTS data dir(s) for ground truth. Pass the SAME "
+                             "dir(s) used for conversion so the test split matches.")
     parser.add_argument("--output_dir", default="runs/exp19_nnunet_native_resenc_eval",
                         help="Output run directory")
     parser.add_argument("--n_folds", type=int, default=5)
