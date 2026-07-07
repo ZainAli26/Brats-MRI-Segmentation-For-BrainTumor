@@ -36,9 +36,12 @@ set "GPU_ID=0"
 set "NNUNET_CONFIG=3d_fullres"
 set "N_FOLDS=5"
 
-REM ResEnc-M planner/plans (right size for a 12 GB card).
+REM ResEnc-M planner, but planned for an explicit VRAM target (see GPU_MEM_TARGET).
+REM Overriding the target writes a NEW plans file (PLANS), so the preset's default
+REM plans stay untouched. Everything downstream trains/predicts with -p %PLANS%.
 set "PLANNER=nnUNetPlannerResEncM"
-set "PLANS=nnUNetResEncUNetMPlans"
+set "GPU_MEM_TARGET=11"
+set "PLANS=nnUNetResEncM_11GBPlans"
 set "TRAINER=nnUNetTrainer"
 
 REM Which folds to train, space-separated.
@@ -75,10 +78,16 @@ echo [Step 1/5] Converting BraTS data (pooling both training dirs)...
 python nnunet_native\convert_to_nnunet.py --data_dir "%DATA_DIR_1%" "%DATA_DIR_2%" --output_dir "%OUTPUT_DIR%" --dataset_id %DATASET_ID% --dataset_name %DATASET_NAME% --mode kfold --n_folds %N_FOLDS% --split_seed 42
 if errorlevel 1 goto :error
 
-REM ---- Step 2/5: Plan & preprocess with the ResEnc-M planner ----
+REM ---- Step 2/5: Plan & preprocess for an explicit %GPU_MEM_TARGET% GB target ----
+REM Split into fingerprint -> plan_experiment -> preprocess because
+REM -gpu_memory_target / -overwrite_plans_name reliably live on plan_experiment.
 echo.
-echo [Step 2/5] Planning ^& preprocessing with %PLANNER%...
-nnUNetv2_plan_and_preprocess -d %DATASET_ID% -pl %PLANNER% -c %NNUNET_CONFIG% --verify_dataset_integrity --verbose
+echo [Step 2/5] Planning ^& preprocessing with %PLANNER% for %GPU_MEM_TARGET% GB...
+nnUNetv2_extract_fingerprint -d %DATASET_ID% --verify_dataset_integrity
+if errorlevel 1 goto :error
+nnUNetv2_plan_experiment -d %DATASET_ID% -pl %PLANNER% -gpu_memory_target %GPU_MEM_TARGET% -overwrite_plans_name %PLANS%
+if errorlevel 1 goto :error
+nnUNetv2_preprocess -d %DATASET_ID% -plans_name %PLANS% -c %NNUNET_CONFIG%
 if errorlevel 1 goto :error
 
 REM Re-assert our patient-level folds: planning regenerates splits_final.json
