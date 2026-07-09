@@ -223,20 +223,48 @@ Inference uses `final` by default — add `-chk checkpoint_best.pth` to use the 
 
 ---
 
-## Evaluation (after folds are trained)
+## Evaluation
+
+`$RES` is the trainer output dir used by both paths below:
 
 ```powershell
 $RES = "$env:nnUNet_results\Dataset102_BraTS2024ResEnc\nnUNetTrainer__nnUNetResEncM_11GBPlans__3d_fullres"
+```
 
-# out-of-fold CV metric (pass the SAME pooled dirs used for conversion)
+Replace `<dir1> <dir2>` with the two `training_data*` paths from section 0 — passing
+the identical pooled dirs is required so the seed-42 test split reconstructs exactly.
+
+### A. Single fold (fold 0 only) — the fast, standard result
+
+Use this when you trained only fold 0 (no full CV). Predicts the held-out test set
+with the single fold-0 model, using its best checkpoint:
+
+```powershell
+# predict held-out test set with fold 0's best checkpoint
+nnUNetv2_predict -i "$env:nnUNet_raw\Dataset102_BraTS2024ResEnc\imagesTs" -o "$RES\test_predictions_fold0" -d 102 -c 3d_fullres -p nnUNetResEncM_11GBPlans -tr nnUNetTrainer -f 0 -chk checkpoint_best.pth
+
+# score against ground truth
+python nnunet_native\evaluate_nnunet.py --pred_dir "$RES\test_predictions_fold0" --data_dir "<dir1>" "<dir2>" --output_dir "runs\exp19_nnunet_native_resenc_test_eval_fold0"
+```
+
+### B. Full 5-fold CV + ensemble — only if all 5 folds are trained
+
+```powershell
+# out-of-fold CV metric
 python nnunet_native\evaluate_nnunet_kfold.py --results_dir "$RES" --data_dir "<dir1>" "<dir2>" --output_dir "runs\exp19_nnunet_native_resenc_eval" --n_folds 5
 
-# predict the held-out test set (ensemble of folds)
+# predict the held-out test set (ensemble of all folds)
 nnUNetv2_predict -i "$env:nnUNet_raw\Dataset102_BraTS2024ResEnc\imagesTs" -o "$RES\test_predictions" -d 102 -c 3d_fullres -p nnUNetResEncM_11GBPlans -tr nnUNetTrainer -f 0 1 2 3 4 -chk checkpoint_best.pth
 
 # score the test predictions with the shared metrics
 python nnunet_native\evaluate_nnunet.py --pred_dir "$RES\test_predictions" --data_dir "<dir1>" "<dir2>" --output_dir "runs\exp19_nnunet_native_resenc_test_eval"
 ```
+
+> **Don't truncate one fold midway and train others differently.** The poly-LR
+> schedule is tied to the declared total epochs, so a fold stopped early is a
+> different model than one that annealed to LR 0. For a valid CV, train every fold
+> under the same schedule (all 1000, or all `nnUNetTrainer_500epochs`), or just
+> report a single fold (path A).
 
 Replace `<dir1> <dir2>` with the two `training_data*` paths from section 0. Passing
 the identical pooled dirs is required so the seed-42 test split reconstructs exactly.
