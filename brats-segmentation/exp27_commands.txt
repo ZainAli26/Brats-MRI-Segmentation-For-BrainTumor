@@ -1,0 +1,71 @@
+exp27 — registration augmentation: commands
+Run all of these from brats-segmentation/.
+
+-------------------------------------------------------------------------------
+1. GENERATE THE SYNTHETIC DATA
+-------------------------------------------------------------------------------
+--config      excludes the seed-42 held-out test patients from pairing (both roles)
+--with-subtraction  writes the 5th channel exp27 needs
+Resumes if interrupted — safe to kill and re-run.
+
+python augment_registration.py \
+    --data-dir ../Brats2024/training_data1_v2 \
+    --data-dir ../Brats2024/training_data_additional \
+    --output-dir ../Brats2024/synthetic_regaug \
+    --config experiments/exp27_replica_5ch_regaug_5fold.yaml \
+    -k 1 --seed 42 --transform SyN --with-subtraction \
+    --num-workers 4 --ants-threads 4
+
+Measured cost (16-core box, 182x218x182 @ 1mm):
+
+                        -k 1        -k 2
+  pairs                 1,468       2,936
+  wall time             ~5.5 h      ~11 h
+  synthetic NIfTIs      ~40 GB      ~79 GB
+  added cache           ~34 GB      ~67 GB
+  total disk            ~74 GB      ~146 GB
+  synthetic share       ~44 %       ~62 %
+
+Only ~140 GB was free on / as of 2026-08-11, so -k 2 does NOT fit — it would
+die during preprocessing, after the generation pass. Use -k 1, or free space
+first and change -k 1 to -k 2 above.
+
+The seed makes -k 2 a strict superset of -k 1: re-running later with -k 2
+skips everything -k 1 already produced.
+
+-------------------------------------------------------------------------------
+2. SMOKE TEST FIRST (optional, seconds)
+-------------------------------------------------------------------------------
+python augment_registration.py \
+    --data-dir ../Brats2024/training_data1_v2 \
+    --output-dir /tmp/regaug_smoke \
+    -k 2 --max-pairs 4 --transform Affine --with-subtraction --dry-run
+
+Drop --dry-run to actually register those 4 pairs with the fast transform.
+
+-------------------------------------------------------------------------------
+3. PREPROCESS + TRAIN
+-------------------------------------------------------------------------------
+Shares exp21's 5-channel cache on purpose, so this only adds the synthetic cases.
+
+python preprocess_replica.py --config experiments/exp27_replica_5ch_regaug_5fold.yaml
+python train_replica.py      --config experiments/exp27_replica_5ch_regaug_5fold.yaml --fold 0
+
+Folds 1-4: repeat with --fold 1 ... --fold 4.
+
+-------------------------------------------------------------------------------
+NOTES
+-------------------------------------------------------------------------------
+- Real cases need *-sub.nii.gz already (same as exp21):
+      python precompute_subtraction.py --data_dir ../Brats2024/training_data1_v2
+      python precompute_subtraction.py --data_dir ../Brats2024/training_data_additional
+- Compare exp27 against exp21, not exp20 — exp21 is exp27 minus the synthetic
+  data, and their val/test sets are byte-identical.
+- Never put ../Brats2024/synthetic_regaug in train_dir or extra_train_dirs. It
+  belongs in data.synthetic_train_dirs; the splitter raises if it sees otherwise.
+- This host's system matplotlib (the python3-matplotlib deb, 3.5.1) shadows the
+  pip matplotlib 3.10 in ~/.local and used to break `import ants`. The script
+  now works around it per-process. The permanent fix, which also silences the
+  "Unable to import Axes3D" warning everywhere else on this box:
+      sudo mv /usr/lib/python3/dist-packages/matplotlib-3.5.1-nspkg.pth \
+              /usr/lib/python3/dist-packages/matplotlib-3.5.1-nspkg.pth.disabled

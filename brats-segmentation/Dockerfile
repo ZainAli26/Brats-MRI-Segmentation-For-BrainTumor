@@ -40,6 +40,7 @@ COPY nnunet_native/ nnunet_native/
 COPY plans/ plans/
 COPY train.py train_kfold.py evaluate.py evaluate_kfold.py \
      preprocess_replica.py train_replica.py evaluate_replica.py \
+     precompute_subtraction.py augment_registration.py \
      analyze_failures.py visualize_segmentations.py export_3d_html.py ./
 
 # Create output directories
