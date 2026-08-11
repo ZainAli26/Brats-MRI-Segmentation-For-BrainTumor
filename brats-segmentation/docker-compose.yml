@@ -34,7 +34,11 @@ x-gpu-common: &gpu-common
     - ./experiments:/app/experiments
     - ./configs:/app/configs
     - ./nnunet_native:/app/nnunet_native
+    - ./plans:/app/plans
     - ./train.py:/app/train.py
+    - ./preprocess_replica.py:/app/preprocess_replica.py
+    - ./train_replica.py:/app/train_replica.py
+    - ./evaluate_replica.py:/app/evaluate_replica.py
     - ./train_kfold.py:/app/train_kfold.py
     - ./evaluate.py:/app/evaluate.py
     - ./evaluate_kfold.py:/app/evaluate_kfold.py
@@ -247,12 +251,14 @@ services:
         --data_dir /data/Brats2024/training_data1_v2
         --fold 4
 
-  # exp20 — custom loop, TRUE ResEnc-M architecture (~102M), SGD recipe, 5-fold CV.
+  # exp20 (SUPERSEDED) — custom loop, TRUE ResEnc-M architecture (~102M), SGD recipe,
+  # 5-fold CV. Kept to reproduce the runs already in runs/. New work should use the
+  # replica services below (replica-exp20-fold0 ...); see NNUNET_REPLICA.md.
   exp20:
     <<: *gpu-common
     command: >
       python train_kfold.py
-        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --config experiments/superseded/exp20_nnunet_v2_resenc_m_5fold.yaml
         --data_dir /data/Brats2024/training_data1_v2
         --extra_data_dir /data/Brats2024/training_data_additional
 
@@ -260,7 +266,7 @@ services:
     <<: *gpu-common
     command: >
       python train_kfold.py
-        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --config experiments/superseded/exp20_nnunet_v2_resenc_m_5fold.yaml
         --data_dir /data/Brats2024/training_data1_v2
         --extra_data_dir /data/Brats2024/training_data_additional
         --fold 0
@@ -269,7 +275,7 @@ services:
     <<: *gpu-common
     command: >
       python train_kfold.py
-        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --config experiments/superseded/exp20_nnunet_v2_resenc_m_5fold.yaml
         --data_dir /data/Brats2024/training_data1_v2
         --extra_data_dir /data/Brats2024/training_data_additional
         --fold 1
@@ -278,7 +284,7 @@ services:
     <<: *gpu-common
     command: >
       python train_kfold.py
-        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --config experiments/superseded/exp20_nnunet_v2_resenc_m_5fold.yaml
         --data_dir /data/Brats2024/training_data1_v2
         --extra_data_dir /data/Brats2024/training_data_additional
         --fold 2
@@ -287,7 +293,7 @@ services:
     <<: *gpu-common
     command: >
       python train_kfold.py
-        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --config experiments/superseded/exp20_nnunet_v2_resenc_m_5fold.yaml
         --data_dir /data/Brats2024/training_data1_v2
         --extra_data_dir /data/Brats2024/training_data_additional
         --fold 3
@@ -296,7 +302,7 @@ services:
     <<: *gpu-common
     command: >
       python train_kfold.py
-        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --config experiments/superseded/exp20_nnunet_v2_resenc_m_5fold.yaml
         --data_dir /data/Brats2024/training_data1_v2
         --extra_data_dir /data/Brats2024/training_data_additional
         --fold 4
@@ -306,11 +312,23 @@ services:
     <<: *gpu-common
     command: >
       python train_kfold.py
-        --config experiments/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --config experiments/superseded/exp20_nnunet_v2_resenc_m_5fold.yaml
         --data_dir /data/Brats2024/training_data1_v2
         --extra_data_dir /data/Brats2024/training_data_additional
         --fold 2
         --resume_dir runs/nnunet_v2_20260630_160330_fold2
+
+  # Resume the interrupted fold-3 run (continues in-place from its best_model.pth,
+  # epoch 100 -> 250).
+  exp20-fold3-resume:
+    <<: *gpu-common
+    command: >
+      python train_kfold.py
+        --config experiments/superseded/exp20_nnunet_v2_resenc_m_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold 3
+        --resume_dir runs/nnunet_v2_20260703_175837_fold3
 
   # ====================================================================
   # Phase 4 — nnU-Net v2 architecture variants
@@ -563,3 +581,199 @@ services:
           --data_dir /data/Brats2024/training_data1_v2 \
           --max_cases 2 \
           --num_workers 2
+
+  # ====================================================================
+  # nnU-Net REPLICA (exp20+) — custom loop that reproduces the native run
+  # ====================================================================
+  # The replica reads plans/nnUNetResEncM_11GBPlans.json and reimplements nnU-Net v2's
+  # preprocessing, sampling, augmentation, loss, schedule, loop and inference in
+  # src/nnunet_replica/. Two steps: build the case cache once, then train per fold.
+  #
+  #   docker-compose run --rm replica-preprocess            # ~10 min, ~30 GB
+  #   docker-compose run --rm replica-exp20-fold0           # ~3.5 days
+  #   docker-compose run --rm replica-exp20-fold0-resume    # after any interruption
+  #   docker-compose run --rm replica-eval-val              # OOF CV Dice/HD95
+  #
+  # Pick a different experiment with the REPLICA_CONFIG host env var (compose
+  # interpolates it at parse time, so export it — do not pass it with -e):
+  #   REPLICA_CONFIG=exp24_replica_plain_unet_11g_5fold.yaml \
+  #     docker-compose run --rm replica-train
+  #
+  # Env vars honoured by the replica services:
+  #   REPLICA_CONFIG  experiment YAML basename   (default exp20_replica_resenc_m_11g_5fold.yaml)
+  #   REPLICA_FOLD    fold index 0-4             (default 0)
+  #   REPLICA_ARGS    extra train_replica.py flags, e.g. "--num_workers 8 --epochs 250"
+  #   RUN_DIRS        run dirs for the eval services
+  # Build the preprocessed case cache (idempotent — re-running resumes).
+  replica-preprocess:
+    <<: *gpu-common
+    command: >
+      python preprocess_replica.py
+        --config experiments/${REPLICA_CONFIG:-exp20_replica_resenc_m_11g_5fold.yaml}
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --num_processes 8
+
+  # Preprocess only what one fold needs, so training can start sooner.
+  replica-preprocess-fold0:
+    <<: *gpu-common
+    command: >
+      python preprocess_replica.py
+        --config experiments/${REPLICA_CONFIG:-exp20_replica_resenc_m_11g_5fold.yaml}
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --num_processes 8
+        --fold 0
+
+  # Generic trainer: choose the experiment with REPLICA_CONFIG and the fold with REPLICA_FOLD.
+  replica-train:
+    <<: *gpu-common
+    command: >
+      python train_replica.py
+        --config experiments/${REPLICA_CONFIG:-exp20_replica_resenc_m_11g_5fold.yaml}
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold ${REPLICA_FOLD:-0}
+        ${REPLICA_ARGS:-}
+
+  # Resume whichever fold REPLICA_FOLD names, in place, from checkpoint_latest.pth.
+  replica-train-resume:
+    <<: *gpu-common
+    command: >
+      python train_replica.py
+        --config experiments/${REPLICA_CONFIG:-exp20_replica_resenc_m_11g_5fold.yaml}
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold ${REPLICA_FOLD:-0}
+        ${REPLICA_ARGS:-}
+        --c
+
+  # --------------------------------------------------------------------
+  # 11 GB variants — the plan's FULL memory footprint, no recomputation
+  # --------------------------------------------------------------------
+  # Identical training to the services above; the only difference is that encoder
+  # activations are stored instead of recomputed (~2x faster steps, needs the ~11 GB
+  # the plan was budgeted for). REQUIRES A >= 11 GB GPU: on the 8 GB RTX 3070 Laptop
+  # this OOMs at the plan's batch 2 (measured), so use the plain services there.
+  #
+  #   REPLICA_FOLD=0 docker-compose run --rm replica-train-11g
+  #   REPLICA_FOLD=0 docker-compose run --rm replica-train-11g-resume
+  #   REPLICA_CONFIG=exp24_replica_plain_unet_11g_5fold.yaml \
+  #     REPLICA_FOLD=0 docker-compose run --rm replica-train-11g
+  replica-train-11g:
+    <<: *gpu-common
+    command: >
+      python train_replica.py
+        --config experiments/${REPLICA_CONFIG:-exp20_replica_resenc_m_11g_5fold.yaml}
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold ${REPLICA_FOLD:-0}
+        --no_grad_checkpointing
+        ${REPLICA_ARGS:-}
+
+  replica-train-11g-resume:
+    <<: *gpu-common
+    command: >
+      python train_replica.py
+        --config experiments/${REPLICA_CONFIG:-exp20_replica_resenc_m_11g_5fold.yaml}
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold ${REPLICA_FOLD:-0}
+        --no_grad_checkpointing
+        ${REPLICA_ARGS:-}
+        --c
+
+  # Does the plan's batch 2 actually fit this GPU without recomputation? Answers in
+  # ~2 minutes instead of finding out 40 minutes into a real run.
+  replica-fit-check-11g:
+    <<: *gpu-common
+    command: >
+      python train_replica.py
+        --config experiments/${REPLICA_CONFIG:-exp20_replica_resenc_m_11g_5fold.yaml}
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold 0
+        --no_grad_checkpointing
+        --smoke_test
+        --max_cases 4
+        --num_workers 4
+        --no_final_validation
+
+  # Wiring check: 2 epochs x 5 iterations on 4 cases. Proves the stack runs; proves
+  # nothing about accuracy.
+  replica-smoke:
+    <<: *gpu-common
+    command: >
+      python train_replica.py
+        --config experiments/${REPLICA_CONFIG:-exp20_replica_resenc_m_11g_5fold.yaml}
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional
+        --fold 0
+        --smoke_test
+        --max_cases 4
+        --num_workers 4
+
+  # Named per-fold shortcuts for the exp20 baseline.
+  replica-exp20-fold0:
+    <<: *gpu-common
+    command: >
+      python train_replica.py --config experiments/exp20_replica_resenc_m_11g_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional --fold 0
+
+  replica-exp20-fold1:
+    <<: *gpu-common
+    command: >
+      python train_replica.py --config experiments/exp20_replica_resenc_m_11g_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional --fold 1
+
+  replica-exp20-fold2:
+    <<: *gpu-common
+    command: >
+      python train_replica.py --config experiments/exp20_replica_resenc_m_11g_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional --fold 2
+
+  replica-exp20-fold3:
+    <<: *gpu-common
+    command: >
+      python train_replica.py --config experiments/exp20_replica_resenc_m_11g_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional --fold 3
+
+  replica-exp20-fold4:
+    <<: *gpu-common
+    command: >
+      python train_replica.py --config experiments/exp20_replica_resenc_m_11g_5fold.yaml
+        --data_dir /data/Brats2024/training_data1_v2
+        --extra_data_dir /data/Brats2024/training_data_additional --fold 4
+
+  # Out-of-fold CV metric: pass every completed fold run dir at once.
+  #   RUN_DIRS="runs/replica_a_fold0 runs/replica_b_fold1" docker-compose run --rm replica-eval-val
+  replica-eval-val:
+    <<: *gpu-common
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        DIRS="$${RUN_DIRS:-$$(ls -d runs/replica_*_fold* 2>/dev/null)}"
+        if [ -z "$$DIRS" ]; then echo "No replica run dirs found; set RUN_DIRS"; exit 1; fi
+        python evaluate_replica.py \
+          --config experiments/$${REPLICA_CONFIG:-exp20_replica_resenc_m_11g_5fold.yaml} \
+          --data_dir /data/Brats2024/training_data1_v2 \
+          --extra_data_dir /data/Brats2024/training_data_additional \
+          --run_dirs $$DIRS --split val
+
+  # Leak-free held-out test, all folds ensembled.
+  replica-eval-test:
+    <<: *gpu-common
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        DIRS="$${RUN_DIRS:-$$(ls -d runs/replica_*_fold* 2>/dev/null)}"
+        if [ -z "$$DIRS" ]; then echo "No replica run dirs found; set RUN_DIRS"; exit 1; fi
+        python evaluate_replica.py \
+          --config experiments/$${REPLICA_CONFIG:-exp20_replica_resenc_m_11g_5fold.yaml} \
+          --data_dir /data/Brats2024/training_data1_v2 \
+          --extra_data_dir /data/Brats2024/training_data_additional \
+          --run_dirs $$DIRS --split test

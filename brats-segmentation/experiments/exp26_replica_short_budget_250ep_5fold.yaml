@@ -1,0 +1,107 @@
+# =============================================================================
+# Exp 26 — Replica at a quarter budget (250 epochs), 5-fold CV
+# =============================================================================
+#
+# exp26 is exp20 with ONE change: 250 epochs instead of 1000. The poly schedule still
+# decays to zero over the run, so this is a genuinely complete 250-epoch training, not
+# an interrupted 1000-epoch one.
+#
+# WHY THIS IS AN EXPERIMENT AND NOT A SHORTCUT
+#   exp20 costs ~3.5 days per fold on the 8 GB laptop (~17 days for 5 folds). Every
+#   subsequent ablation (exp21-exp25) inherits that cost, which makes the series
+#   unaffordable to run honestly. exp26 measures what a 4x shorter schedule actually
+#   costs in Dice. If the gap is small, the ablations can legitimately be run at 250
+#   epochs against an exp26 baseline instead of an exp20 one; if it is large, that is
+#   worth knowing before committing weeks of GPU time.
+#
+#   Report exp26 numbers ONLY against other 250-epoch runs. Comparing a 250-epoch
+#   ablation to the 1000-epoch exp20 baseline would confound budget with the change
+#   being tested — the exact mistake this experiment exists to prevent.
+#
+# Reuses exp20's 4-channel preprocessed cache.
+#
+# RUN (cache already built by exp20)
+#   python train_replica.py --config experiments/exp26_replica_short_budget_250ep_5fold.yaml --fold 0
+# =============================================================================
+
+data:
+  dataset: "brats2024"
+  train_dir: "../Brats2024/training_data1_v2"
+  extra_train_dirs:
+    - "../Brats2024/training_data_additional"
+  val_dir: "../Brats2024/validation_data"
+  modalities: ["t1c", "t1n", "t2f", "t2w"]
+  num_classes: 5
+  label_map: {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
+  inverse_label_map: {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
+  class_names: {1: "NETC", 2: "SNFH", 3: "ET", 4: "RC"}
+  split_seed: 42
+  split_ratios: [0.75, 0.15, 0.10]
+  n_folds: 5
+  kfold_holdout_test: true
+
+replica:
+  plans_json: "plans/nnUNetResEncM_11GBPlans.json"
+  configuration: "3d_fullres"
+  preprocessed_dir: "/app/.cache/replica/Dataset102_4ch"   # shared with exp20/22/24/25
+  store_dtype: "float16"
+
+  # ---- THE ONLY CHANGE vs exp20 --------------------------------------------------
+  num_epochs: 250            # poly LR still decays fully across these 250 epochs
+  # --------------------------------------------------------------------------------
+  num_iterations_per_epoch: 250
+  num_val_iterations_per_epoch: 50
+  initial_lr: 0.01
+  weight_decay: 0.00003
+  momentum: 0.99
+  nesterov: true
+  poly_exponent: 0.9
+  oversample_foreground_percent: 0.33
+  grad_clip: 12.0
+  amp: true
+  save_every: 25
+
+  loss: "dice_ce"
+  dice_weight: 1.0
+  ce_weight: 1.0
+  deep_supervision: true
+  ds_zero_lowest: true
+  batch_dice: null
+
+  batch_size: null
+  grad_accum_steps: 1
+  grad_checkpointing: true
+  patch_size: null
+
+  num_workers: 12
+  seed: 42
+  validate_with_full_images: true
+  tile_step_size: 0.5
+  use_mirroring: true
+
+inference:
+  mode: "gaussian"
+  tta: true
+  overlap: 0.5
+  postprocess: false
+
+evaluation:
+  metrics: ["dice", "hausdorff95"]
+  regions:
+    ET: [3]
+    TC: [1, 3]
+    WT: [1, 2, 3]
+    RC: [4]
+  failure_dice_threshold: 0.5
+  small_tumor_volume_threshold: 500
+  num_failure_cases: 10
+
+model:
+  name: "nnunet_replica_resenc_m_11g_250ep"
+  in_channels: 4
+  out_channels: 5
+
+experiment:
+  output_dir: "./runs"
+  save_best_only: true
+  log_interval: 10

@@ -1,5 +1,12 @@
 # BraTS MRI Segmentation
 
+> **nnU-Net replica (exp20+).** `src/nnunet_replica/` reimplements nnU-Net v2's full
+> training procedure — preprocessing, patch sampling, augmentation, loss, schedule, loop
+> and inference — driven by a real `plans.json`, so a custom loop can reproduce the
+> native run's numbers instead of approximating them. Experiments from exp20 onward are
+> built on it as single-variable ablations. See **[NNUNET_REPLICA.md](NNUNET_REPLICA.md)**.
+
+
 Multi-model brain tumor segmentation pipeline for BraTS 2023/2024 datasets.
 Compares four architectures under identical preprocessing, evaluates per-class
 and per-region metrics, and provides visual debugging for failure cases.
