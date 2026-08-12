@@ -92,6 +92,45 @@ python evaluate_replica.py --config <cfg> --run_dirs runs/replica_*_fold[0-4] \
     --split test --postprocessing_json <out>/postprocessing.json
 ```
 
+## Ensembling several models
+
+`evaluate_replica.py` ensembles the 5 folds of one experiment. `evaluate_ensemble.py`
+ensembles across experiments — the analogue of `nnUNetv2_ensemble` — by averaging the
+members' softmax and argmaxing once at the end:
+
+```bash
+python evaluate_ensemble.py --split test \
+    --member experiments/exp20_replica_resenc_m_11g_5fold.yaml runs/exp20_fold[0-4] \
+    --member experiments/exp21_replica_5ch_subtraction_5fold.yaml runs/exp21_fold[0-4] \
+    --member experiments/exp25_replica_segresnet_ds_5fold.yaml runs/exp25_fold[0-4]
+```
+
+Members may differ in architecture, plan, patch size and input channels — a 4-channel model
+and a 5-channel subtraction model ensemble fine. `--weights` sets per-member weights (folds
+inside a member are always averaged equally, so a member's influence does not depend on how
+many folds it contributed). `--split val` gives the ensemble's out-of-fold CV number, with
+each case predicted only by the fold that held it out; `--split test` uses every fold.
+`--determine_postprocessing` and `--postprocessing_json` work exactly as they do for a single
+model.
+
+Two things it enforces rather than assumes, because both failures are silent:
+
+* **Averaging happens in the original uncropped volume.** Members with different input
+  channels get different nonzero-crop bboxes, so their cropped predictions are not
+  voxel-aligned; each is un-cropped first, with the probability mass outside a member's crop
+  put on background (what the crop asserted about that region anyway). A flat-zero fill there
+  would let the loosest-cropping member decide the argmax on its own.
+* **Every member must share the patient split.** Differing per-fold validation sets or
+  held-out test ids are refused by name, since the ensemble would otherwise score a case with
+  a network that trained on it. Differing *train* sets are fine and expected — exp27 adds
+  synthetic cases to train only.
+
+Weights live on the CPU between networks and move to the GPU per case, so a 3-member x 5-fold
+line-up of 100M-parameter nets runs on the 8 GB card; the transfers are milliseconds against
+seconds of 8-flip sliding-window inference.
+
+Checks: `tools/replica_parity/ensemble_checks.py` (7 checks).
+
 ## Inference and post-processing
 
 **Inference** is a port, not a delegation to MONAI, and is bit-exact against native 2.4.2:

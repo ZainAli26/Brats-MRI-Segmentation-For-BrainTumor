@@ -196,39 +196,49 @@ def print_summary(df: pd.DataFrame, regions: Dict, title: str) -> Dict:
     return summary
 
 
+def cached_oof_loader(pred_cache: Path, dataset_folder: Path):
+    """``(case_id) -> (cached prediction, ground truth)`` for replica-cropped predictions.
+
+    Both live in the member's *cropped* preprocessed geometry, so they line up directly.
+    The ensemble evaluator works in original-volume geometry and supplies its own loader.
+    """
+    def load(case_id: str):
+        pred = np.load(pred_cache / f"{case_id}.npy")
+        seg = np.load(dataset_folder / f"{case_id}_seg.npy", mmap_mode="r")
+        return pred, np.asarray(seg[0])
+    return load
+
+
 def determine_and_report(
     case_ids: Sequence[str],
-    pred_cache: Path,
-    dataset_folder: Path,
+    load_fn,
     out_dir: Path,
     num_classes: int,
     regions: Dict[str, List[int]],
     class_names: Dict[int, str],
     criterion: str,
     compute_hd: bool = True,
-) -> None:
-    """Run nnU-Net's post-processing determination on cached OOF predictions.
+    tag: str = "val",
+    eps: float = 0.0,
+) -> List[List[int]]:
+    """Run nnU-Net's post-processing determination on already-computed OOF predictions.
 
-    Determination is a pure re-scoring loop over the cached predictions, so it costs no
-    extra inference. The resulting ops go to ``postprocessing.json`` for later application
-    to the held-out test set — determination itself only ever sees validation data.
+    ``load_fn(case_id) -> (pred, gt)`` supplies matched integer label volumes; both this
+    script (cropped replica geometry) and evaluate_ensemble.py (original volume geometry)
+    provide their own. Determination is a pure re-scoring loop, so it costs no extra
+    inference. The accepted ops go to ``postprocessing.json`` for later application to the
+    held-out test set — determination itself only ever sees validation data.
+
+    Returns the accepted ops.
     """
     from src.evaluation.nnunet_postprocessing import (
         apply_postprocessing, determine_postprocessing_streaming, num_determination_passes,
     )
 
-    available = [c for c in case_ids if (pred_cache / f"{c}.npy").is_file()]
+    available = list(case_ids)
     if not available:
-        console.print(f"[red]No cached predictions in {pred_cache}[/red]")
-        return
-    if len(available) < len(case_ids):
-        console.print(f"[yellow]{len(case_ids) - len(available)} cached predictions missing; "
-                      f"determining on {len(available)} cases[/yellow]")
-
-    def load(case_id: str):
-        pred = np.load(pred_cache / f"{case_id}.npy")
-        seg = np.load(dataset_folder / f"{case_id}_seg.npy", mmap_mode="r")
-        return pred, np.asarray(seg[0])
+        console.print("[red]No predictions to determine post-processing from[/red]")
+        return []
 
     foreground = list(range(1, num_classes))
     n_passes = num_determination_passes(foreground, regions, criterion)
@@ -236,26 +246,29 @@ def determine_and_report(
                   f"(criterion={criterion}, {n_passes} scoring passes)[/bold]")
     bar = tqdm(total=len(available) * n_passes, desc="determine PP")
     ops, report = determine_postprocessing_streaming(
-        available, load, foreground, regions, criterion=criterion,
+        available, load_fn, foreground, regions, eps=eps, criterion=criterion,
         on_case=lambda: bar.update(1),
     )
     bar.close()
+
+    def fmt(v, plus=False):
+        # 5 decimals, matching what the report stores: nnU-Net accepts on a strict >, so a
+        # gain far below 0.0001 is a legitimate ACCEPT and should not look like a display bug.
+        return "-" if v is None else (f"{v:+.5f}" if plus else f"{v:.5f}")
 
     table = Table(title="Post-processing determination (nnU-Net rules)", style="bold magenta")
     for col in ("Candidate", "Judged on", "Before", "After", "Region mean", "Decision"):
         table.add_column(col, justify="left" if col == "Candidate" else "right")
     for entry in report["log"]:
+        delta = (None if entry["judged_value"] is None or entry["judged_value_before"] is None
+                 else entry["judged_value"] - entry["judged_value_before"])
         table.add_row(
-            entry["op"], entry["judged_on"],
-            "-" if entry["judged_value_before"] is None else f"{entry['judged_value_before']:.4f}",
-            "-" if entry["judged_value"] is None else f"{entry['judged_value']:.4f}",
-            "-" if entry["region_mean"] is None else f"{entry['region_mean']:.4f}",
-            "[green]ACCEPT[/green]" if entry["accepted"] else "[dim]reject[/dim]",
+            entry["op"], entry["judged_on"], fmt(entry["judged_value_before"]),
+            fmt(entry["judged_value"]), fmt(entry["region_mean"]),
+            ("[green]ACCEPT[/green]" if entry["accepted"] else "[dim]reject[/dim]")
+            + (f" [dim]({delta:+.1e})[/dim]" if delta is not None and abs(delta) < 1e-5 else ""),
         )
     console.print(table)
-
-    def fmt(v, plus=False):
-        return "-" if v is None else (f"{v:+.4f}" if plus else f"{v:.4f}")
 
     console.print(f"selection metric ({criterion}): {fmt(report['baseline_dice'])} -> "
                   f"{fmt(report['final_dice'])}  |  BraTS region mean: "
@@ -271,24 +284,25 @@ def determine_and_report(
 
     if not ops:
         console.print("[dim]No candidate improved validation Dice — nnU-Net post-processing is "
-                      "a no-op for this model. Report raw predictions.[/dim]")
-        return
+                      "a no-op here. Report raw predictions.[/dim]")
+        return ops
 
     # Re-score the OOF set with the accepted ops so the CV number is reported both ways.
     rows = []
     for case_id in tqdm(available, desc="rescoring with ops"):
-        pred, gt = load(case_id)
+        pred, gt = load_fn(case_id)
         gt = np.where(gt < 0, 0, gt)
         rows.append(score_case(apply_postprocessing(pred, ops), gt, case_id,
                                regions, class_names, compute_hd))
     df_pp = pd.DataFrame(rows)
     summary_pp = print_summary(df_pp, regions, "Out-of-fold validation + nnU-Net post-processing")
     summary_pp["nnunet_postprocess_ops"] = ops
-    df_pp.to_csv(out_dir / "replica_metrics_val_nnunet_pp.csv", index=False)
-    with open(out_dir / "replica_summary_val_nnunet_pp.json", "w") as f:
+    df_pp.to_csv(out_dir / f"metrics_{tag}_nnunet_pp.csv", index=False)
+    with open(out_dir / f"summary_{tag}_nnunet_pp.json", "w") as f:
         json.dump(summary_pp, f, indent=2, default=float)
-    console.print(f"[green]Wrote {out_dir}/replica_metrics_val_nnunet_pp.csv[/green]")
+    console.print(f"[green]Wrote {out_dir}/metrics_{tag}_nnunet_pp.csv[/green]")
     console.print(f"[bold]Apply to test:[/bold] --split test --postprocessing_json {pp_path}")
+    return ops
 
 
 def main():
@@ -316,6 +330,10 @@ def main():
     ap.add_argument("--pp_criterion", choices=["labels", "regions"], default="labels",
                     help="Metric driving op selection: 'labels' = nnU-Net-faithful, "
                          "'regions' = the BraTS ET/TC/WT/RC score that is actually reported")
+    ap.add_argument("--pp_min_gain", type=float, default=0.0,
+                    help="Dice margin an op must clear to be accepted. nnU-Net uses a strict "
+                         "> (0.0), which accepts arbitrarily tiny gains; raise it (e.g. 1e-4) "
+                         "to demand a real improvement rather than validation noise.")
     ap.add_argument("--pred_cache_dir", default=None,
                     help="Where raw predictions are cached (default: <output_dir>/predictions_<split>)")
     ap.add_argument("--no_tta", action="store_true", help="Disable mirroring TTA")
@@ -458,9 +476,15 @@ def main():
                   f"replica_summary_{suffix}.json[/green]")
 
     if args.determine_postprocessing:
+        cached = [c for c in scored_ids if (pred_cache / f"{c}.npy").is_file()]
+        if len(cached) < len(scored_ids):
+            console.print(f"[yellow]{len(scored_ids) - len(cached)} cached predictions missing "
+                          f"in {pred_cache}; determining on {len(cached)} cases[/yellow]")
         determine_and_report(
-            scored_ids, pred_cache, Path(dataset_folder), out_dir, num_classes, regions,
-            class_names, args.pp_criterion, compute_hd=not args.no_hd95,
+            cached, cached_oof_loader(pred_cache, Path(dataset_folder)), out_dir,
+            num_classes, regions, class_names, args.pp_criterion,
+            compute_hd=not args.no_hd95, tag=f"{args.split}_{args.checkpoint}",
+            eps=args.pp_min_gain,
         )
 
 
