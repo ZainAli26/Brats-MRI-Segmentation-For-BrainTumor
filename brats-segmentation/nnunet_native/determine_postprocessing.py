@@ -66,6 +66,9 @@ def main():
     ap.add_argument("--data_dir", default="../Brats2024/training_data1_v2", help="GT data dir")
     ap.add_argument("--out_json", required=True, help="Where to write postprocessing.json")
     ap.add_argument("--num_classes", type=int, default=5, help="5=BraTS2024, 4=BraTS2023")
+    ap.add_argument("--criterion", choices=["labels", "regions"], default="labels",
+                    help="Metric driving op selection: 'labels' = nnU-Net-faithful, "
+                         "'regions' = the BraTS ET/TC/WT/RC score that is actually reported")
     args = ap.parse_args()
 
     pred_dir = Path(args.pred_dir).expanduser().resolve()
@@ -79,22 +82,30 @@ def main():
         sys.exit(1)
     console.print(f"\n[bold]Determining post-processing on {len(preds)} validation cases...[/bold]")
 
-    ops, report = determine_postprocessing(preds, gts, foreground, regions)
+    ops, report = determine_postprocessing(preds, gts, foreground, regions,
+                                           criterion=args.criterion)
 
-    table = Table(title="Post-processing determination", style="bold magenta")
-    table.add_column("Candidate"); table.add_column("Mean Dice", justify="right"); table.add_column("Decision")
+    def _fmt(v):
+        return "-" if v is None else f"{v:.4f}"
+
+    table = Table(title="Post-processing determination (nnU-Net rules)", style="bold magenta")
+    for col in ("Candidate", "Judged on", "Before", "After", "Region mean", "Decision"):
+        table.add_column(col, justify="left" if col == "Candidate" else "right")
     for entry in report["log"]:
-        table.add_row(entry["op"], f"{entry['dice']:.4f}",
+        table.add_row(entry["op"], entry["judged_on"], _fmt(entry["judged_value_before"]),
+                      _fmt(entry["judged_value"]), _fmt(entry["region_mean"]),
                       "[green]ACCEPT[/green]" if entry["accepted"] else "[dim]reject[/dim]")
     console.print(table)
-    console.print(f"baseline={report['baseline_dice']:.4f}  ->  final={report['final_dice']:.4f}  "
-                  f"(gain {report['gain']:+.4f})")
+    console.print(f"selection ({args.criterion}): {_fmt(report['baseline_dice'])} -> "
+                  f"{_fmt(report['final_dice'])}   |   BraTS region mean: "
+                  f"{_fmt(report['baseline_region_dice'])} -> {_fmt(report['final_region_dice'])}")
 
     out = Path(args.out_json).expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
         json.dump({"operations": ops, "regions": regions, "num_classes": args.num_classes,
-                   "report": report, "n_val_cases": len(preds)}, f, indent=2)
+                   "criterion": args.criterion, "report": report,
+                   "n_val_cases": len(preds)}, f, indent=2, default=float)
     console.print(f"[green]Saved -> {out}[/green]")
     if not ops:
         console.print("[dim]No operation improved validation Dice — test eval will be unchanged.[/dim]")

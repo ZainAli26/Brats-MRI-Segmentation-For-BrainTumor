@@ -84,7 +84,36 @@ python evaluate_replica.py --config experiments/exp20_replica_resenc_m_11g_5fold
     --run_dirs runs/replica_*_fold0 --split val        # out-of-fold CV
 python evaluate_replica.py --config experiments/exp20_replica_resenc_m_11g_5fold.yaml \
     --run_dirs runs/replica_*_fold[0-4] --split test   # held-out, 5 folds ensembled
+
+# 4. Post-processing, the nnU-Net way: determine on OOF, apply to test.
+python evaluate_replica.py --config <cfg> --run_dirs runs/replica_*_fold[0-4] \
+    --split val --determine_postprocessing              # -> <out>/postprocessing.json
+python evaluate_replica.py --config <cfg> --run_dirs runs/replica_*_fold[0-4] \
+    --split test --postprocessing_json <out>/postprocessing.json
 ```
+
+## Inference and post-processing
+
+**Inference** is a port, not a delegation to MONAI, and is bit-exact against native 2.4.2:
+Gaussian tile weighting (σ = patch/8, zeros lifted so the weight map can't divide by zero),
+nnU-Net's evenly-spread step placement, and complete mirroring TTA — all
+2³ = 8 flip combinations, with the **logits** averaged before a single softmax. Fold
+ensembling averages softmax across folds, as `nnUNetv2_ensemble` does. The one nnU-Net step
+not ported is resampling logits back to the original spacing before argmax; BraTS is already
+at the plans' 1 mm isotropic target so it is a no-op, and `undo_cropping` raises if a plan
+ever does resample rather than silently misaligning.
+
+**Post-processing** — two different things, easy to conflate:
+
+| | what it does | when |
+|---|---|---|
+| `--determine_postprocessing` / `--postprocessing_json` | nnU-Net's own: greedily accept "remove all but largest component" ops, first over all foreground merged (accepted only if the mean improves **and** no single label degrades), then per label (accepted only if **that label's** Dice improves). 26-connectivity; both-empty Dice is NaN and excluded. Frequently a no-op. | to report an nnU-Net-comparable number |
+| `--postprocess` / `inference.postprocess` | BraTS-competition heuristic with hand-picked thresholds: small-component cleanup, ET < 250 vx folded into the core, hole filling. nnU-Net does **none** of this. | as a labelled comparison only |
+
+Determination reads only out-of-fold validation predictions and writes the accepted ops to
+`postprocessing.json`; that file is what gets applied to the held-out test set, so the test
+split never influences its own post-processing. Predictions are cached to
+`<out>/predictions_val/`, so determination costs no extra inference.
 
 ### Under Docker
 

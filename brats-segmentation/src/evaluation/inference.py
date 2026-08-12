@@ -1,13 +1,24 @@
 """nnU-Net v2-style inference: Gaussian-weighted sliding window + mirroring TTA.
 
 The default MONAI inference used elsewhere (constant window weighting, no test-time
-augmentation) under-scores vs nnU-Net. This module reproduces nnU-Net's inference:
+augmentation) under-scores vs nnU-Net. This module approximates nnU-Net's inference:
 
   * sliding window with Gaussian importance weighting (center voxels weighted higher)
-  * test-time augmentation by mirroring over spatial axes (softmax averaged)
+  * test-time augmentation by mirroring over spatial axes (2**n_axes forward passes)
 
 It is architecture-agnostic — it only calls `model(x)` — so it keeps working if you
 swap the network later. Returns probabilities so callers can argmax + post-process.
+
+Two caveats vs the real thing, which is why the replica has its own port in
+``src/nnunet_replica/inference.py``:
+
+* TTA averages **logits**, not per-flip softmax outputs — nnU-Net sums the flipped network
+  outputs and divides once, before any nonlinearity. Averaging softmax first is a different
+  (and slightly flatter) estimator. ``tta_average="softmax"`` restores the old behaviour for
+  reproducing previously recorded exp01–18 numbers.
+* MONAI's sliding window walks a fixed stride and clamps the last window, where nnU-Net
+  spreads an exact step count evenly over each axis, so the tiles — and therefore border
+  predictions — still differ.
 """
 
 from itertools import combinations
@@ -39,6 +50,7 @@ def predict_probabilities(
     mode: str = "gaussian",
     tta: bool = False,
     tta_axes: Sequence[int] = (0, 1, 2),
+    tta_average: str = "logits",
 ) -> torch.Tensor:
     """Run sliding-window inference and return softmax probabilities.
 
@@ -46,13 +58,17 @@ def predict_probabilities(
         image: (B, C, H, W, D) input.
         roi_size: sliding-window patch size (the training patch / spatial_size).
         mode: "gaussian" (nnU-Net) or "constant".
-        tta: if True, average softmax over axis-mirroring flips (nnU-Net TTA).
+        tta: if True, average over axis-mirroring flips (nnU-Net TTA).
         tta_axes: spatial axes to mirror (0,1,2 -> X,Y,Z), as offsets from the
                   spatial dims (channel/batch handled internally).
+        tta_average: "logits" (nnU-Net: average network outputs, then softmax once) or
+                  "softmax" (legacy: softmax each flip, then average).
 
     Returns:
         (B, C, H, W, D) probability tensor (softmax over channels).
     """
+    if tta_average not in ("logits", "softmax"):
+        raise ValueError(f"tta_average must be 'logits' or 'softmax', got {tta_average!r}")
     fn = inference_wrapper(model)
 
     def _sw(x):
@@ -65,18 +81,21 @@ def predict_probabilities(
 
     # Spatial axes in the (B, C, H, W, D) tensor are dims 2,3,4.
     spatial_dims = [a + 2 for a in tta_axes]
-    prob_sum = None
+    acc = None
     n = 0
     for flip_set in _mirror_axis_sets(list(range(len(tta_axes)))):
         dims = tuple(spatial_dims[i] for i in flip_set)
         x = torch.flip(image, dims=dims) if dims else image
-        logits = _sw(x)
-        probs = torch.softmax(logits, dim=1)
+        out = _sw(x)
+        if tta_average == "softmax":
+            out = torch.softmax(out, dim=1)
         if dims:  # undo the flip so predictions realign with the input
-            probs = torch.flip(probs, dims=dims)
-        prob_sum = probs if prob_sum is None else prob_sum + probs
+            out = torch.flip(out, dims=dims)
+        acc = out if acc is None else acc + out
         n += 1
-    return prob_sum / n
+    acc = acc / n
+    # Logit averaging defers the nonlinearity to a single softmax at the end, as nnU-Net does.
+    return torch.softmax(acc, dim=1) if tta_average == "logits" else acc
 
 
 def inference_kwargs_from_config(config: dict) -> dict:
@@ -88,6 +107,7 @@ def inference_kwargs_from_config(config: dict) -> dict:
     return dict(
         mode=inf.get("mode", "constant"),
         tta=inf.get("tta", False),
+        tta_average=inf.get("tta_average", "logits"),
         overlap=inf.get("overlap", config.get("training", {}).get("sw_overlap", 0.5)),
         postprocess=inf.get("postprocess", False),
     )

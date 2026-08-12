@@ -70,6 +70,7 @@ def compute_case_metrics(
                 probs = predict_probabilities(
                     model, images, spatial_size, sw_batch,
                     overlap=inf["overlap"], mode=inf["mode"], tta=inf["tta"],
+                    tta_average=inf["tta_average"],
                 )
 
             probs_list = decollate_batch(probs)

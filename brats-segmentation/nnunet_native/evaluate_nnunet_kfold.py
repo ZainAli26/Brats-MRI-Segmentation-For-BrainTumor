@@ -129,7 +129,9 @@ def evaluate_kfold(results_dir, data_dir, output_dir, n_folds=5, visualize=True,
             pp_ops = json.load(f).get("operations", [])
         console.print(f"[cyan]Applying provided post-processing ops: {pp_ops}[/cyan]")
     elif postprocess:
-        from src.evaluation.nnunet_postprocessing import determine_postprocessing_streaming
+        from src.evaluation.nnunet_postprocessing import (
+            determine_postprocessing_streaming, num_determination_passes,
+        )
         # build (pred_path, gt_path) items over cases that have GT
         items = []
         for case_id, pred_file, _ in preds:
@@ -149,7 +151,7 @@ def evaluate_kfold(results_dir, data_dir, output_dir, n_folds=5, visualize=True,
 
         console.print(f"\n[bold]Determining post-processing on {len(items)} OOF cases "
                       f"(streaming, multi-pass)...[/bold]")
-        n_passes = 1 + len(foreground) + 1  # baseline + per-candidate
+        n_passes = num_determination_passes(foreground, regions_pp)  # baseline + per-candidate
         bar = tqdm(total=len(items) * n_passes, desc="Determining PP")
         pp_ops, pp_report = determine_postprocessing_streaming(
             items, _load, foreground, regions_pp, on_case=lambda: bar.update(1)
@@ -159,9 +161,11 @@ def evaluate_kfold(results_dir, data_dir, output_dir, n_folds=5, visualize=True,
             import json
             json.dump({"operations": pp_ops, "regions": regions_pp,
                        "num_classes": num_classes, "report": pp_report}, f, indent=2)
-        console.print(f"[green]Determined ops {pp_ops} — baseline "
-                      f"{pp_report['baseline_dice']:.4f} -> {pp_report['final_dice']:.4f} "
-                      f"(gain {pp_report['gain']:+.4f}); saved postprocessing.json[/green]")
+        console.print(f"[green]Determined ops {pp_ops} — selection metric "
+                      f"({pp_report['criterion']}) {pp_report['baseline_dice']:.4f} -> "
+                      f"{pp_report['final_dice']:.4f}; BraTS region mean "
+                      f"{pp_report['baseline_region_dice']:.4f} -> "
+                      f"{pp_report['final_region_dice']:.4f}; saved postprocessing.json[/green]")
 
     if pp_ops:
         from src.evaluation.nnunet_postprocessing import apply_postprocessing

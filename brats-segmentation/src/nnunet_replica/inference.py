@@ -161,7 +161,23 @@ def logits_to_segmentation(logits: torch.Tensor) -> np.ndarray:
 
 
 def undo_cropping(seg_cropped: np.ndarray, properties: Dict) -> np.ndarray:
-    """Place a prediction back into the original (uncropped) volume, zeros elsewhere."""
+    """Place a prediction back into the original (uncropped) volume, zeros elsewhere.
+
+    nnU-Net's ``convert_predicted_logits_to_segmentation_with_correct_shape`` resamples the
+    *logits* back to the original spacing before the argmax, then un-crops. This port skips
+    the resampling step because BraTS is already at the plans' 1 mm isotropic target, making
+    it a no-op. Any plan that actually resamples needs that step added — checked explicitly
+    here rather than left to fail as a confusing broadcast error.
+    """
+    pre = properties.get("shape_after_cropping_and_before_resampling")
+    post = properties.get("shape_after_resampling")
+    if pre is not None and post is not None and list(pre) != list(post):
+        raise NotImplementedError(
+            f"Preprocessing resampled this case ({list(pre)} -> {list(post)}), but inference "
+            f"argmaxes at the resampled resolution and only undoes cropping. Resample the "
+            f"logits back to {list(pre)} before argmax (nnU-Net does this) — otherwise the "
+            f"prediction does not align with the ground truth."
+        )
     full = np.zeros(properties["shape_before_cropping"], dtype=seg_cropped.dtype)
     bbox = properties["bbox_used_for_cropping"]
     slicer = tuple(slice(lo, hi) for lo, hi in bbox)

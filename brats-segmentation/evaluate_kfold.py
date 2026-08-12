@@ -56,19 +56,36 @@ console = Console()
 
 # ── inference helpers ─────────────────────────────────────────────────────────
 
-def _sliding_window_softmax(model, images, spatial_size, sw_batch, sw_overlap, use_amp, device):
-    """Run sliding-window inference and return raw softmax logits (B, C, H, W, D)."""
+def _sliding_window_logits(model, images, spatial_size, sw_batch, sw_overlap, use_amp,
+                           device, sw_mode="gaussian"):
+    """Run sliding-window inference and return raw logits (B, C, H, W, D)."""
     with torch.no_grad():
         with autocast(enabled=use_amp):
             logits = sliding_window_inference(
                 images, spatial_size, sw_batch,
-                inference_wrapper(model), overlap=sw_overlap,
+                inference_wrapper(model), overlap=sw_overlap, mode=sw_mode,
             )
-    return torch.softmax(logits, dim=1)
+    return logits
 
 
-def _tta_softmax(model, images, spatial_size, sw_batch, sw_overlap, use_amp, device):
-    """Average softmax over 8 flip augmentations (all axis combinations)."""
+def _sliding_window_softmax(model, images, spatial_size, sw_batch, sw_overlap, use_amp,
+                            device, sw_mode="gaussian"):
+    """Sliding-window inference, softmaxed over the class dim."""
+    return torch.softmax(
+        _sliding_window_logits(model, images, spatial_size, sw_batch, sw_overlap,
+                               use_amp, device, sw_mode),
+        dim=1,
+    )
+
+
+def _tta_softmax(model, images, spatial_size, sw_batch, sw_overlap, use_amp, device,
+                 sw_mode="gaussian", tta_average="logits"):
+    """Average over 8 flip augmentations (all spatial axis combinations).
+
+    ``tta_average="logits"`` matches nnU-Net: sum the flipped network outputs, divide once,
+    softmax at the end. ``"softmax"`` is the legacy behaviour (softmax per flip, then
+    average) — a different estimator, needed only to reproduce previously recorded numbers.
+    """
     dims_list = [
         [],
         [2], [3], [4],
@@ -78,11 +95,15 @@ def _tta_softmax(model, images, spatial_size, sw_batch, sw_overlap, use_amp, dev
     acc = None
     for dims in dims_list:
         aug = torch.flip(images, dims) if dims else images
-        prob = _sliding_window_softmax(model, aug, spatial_size, sw_batch, sw_overlap, use_amp, device)
+        out = _sliding_window_logits(model, aug, spatial_size, sw_batch, sw_overlap,
+                                     use_amp, device, sw_mode)
+        if tta_average == "softmax":
+            out = torch.softmax(out, dim=1)
         if dims:
-            prob = torch.flip(prob, dims)
-        acc = prob if acc is None else acc + prob
-    return acc / len(dims_list)
+            out = torch.flip(out, dims)
+        acc = out if acc is None else acc + out
+    acc = acc / len(dims_list)
+    return torch.softmax(acc, dim=1) if tta_average == "logits" else acc
 
 
 # ── region dice / hd95 ───────────────────────────────────────────────────────
@@ -138,14 +159,20 @@ def evaluate(
     use_tta: bool = False,
     use_postproc: bool = False,
     postproc_kwargs: dict = None,
+    sw_mode: str = "gaussian",
+    tta_average: str = "logits",
 ) -> pd.DataFrame:
     """Run evaluation over dataloader, optionally ensembling multiple models.
 
     Args:
         models: list of torch.nn.Module (already on device, eval mode).
         use_tta: whether to apply flip TTA per model.
-        use_postproc: whether to apply CCA + ET suppression + hole filling.
+        use_postproc: whether to apply the heuristic BraTS cleanup (CCA + ET suppression
+            + hole filling). This is not nnU-Net's post-processing; see
+            src/evaluation/nnunet_postprocessing.py for that.
         postproc_kwargs: forwarded to postprocess_prediction().
+        sw_mode: sliding-window weighting, "gaussian" (nnU-Net) or "constant" (legacy).
+        tta_average: "logits" (nnU-Net) or "softmax" (legacy).
     """
     if postproc_kwargs is None:
         postproc_kwargs = {}
@@ -174,8 +201,12 @@ def evaluate(
         # ── ensemble softmax across all fold models ──
         prob_acc = None
         for m in models:
-            fn = _tta_softmax if use_tta else _sliding_window_softmax
-            prob = fn(m, images, spatial_size, sw_batch, sw_overlap, use_amp, device)
+            if use_tta:
+                prob = _tta_softmax(m, images, spatial_size, sw_batch, sw_overlap, use_amp,
+                                    device, sw_mode, tta_average)
+            else:
+                prob = _sliding_window_softmax(m, images, spatial_size, sw_batch, sw_overlap,
+                                               use_amp, device, sw_mode)
             prob_acc = prob if prob_acc is None else prob_acc + prob
         ensemble_prob = prob_acc / len(models)  # (B, C, H, W, D)
 
@@ -270,6 +301,15 @@ def main():
                         help="CCA min component size in voxels (default: 50)")
     parser.add_argument("--no_fill_holes", action="store_true",
                         help="Disable morphological hole filling")
+    parser.add_argument("--sw_mode", choices=["gaussian", "constant"], default="gaussian",
+                        help="Sliding-window weighting: gaussian (nnU-Net) or constant (legacy)")
+    parser.add_argument("--tta_average", choices=["logits", "softmax"], default="logits",
+                        help="TTA averaging: logits (nnU-Net) or softmax (legacy). Reproducing "
+                             "pre-2026-08 exp17/exp18 numbers needs --sw_mode constant "
+                             "--tta_average softmax.")
+    parser.add_argument("--legacy_postproc", action="store_true",
+                        help="Restore the old heuristic post-processing: zero every small "
+                             "component (punches holes in WT/TC) and fill holes per axial slice")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Where to save CSV results (default: first fold_dir/eval_kfold)")
     parser.add_argument("--num_workers", type=int, default=2)
@@ -290,6 +330,8 @@ def main():
         et_min_voxels=args.et_min_voxels,
         min_component_size=args.min_component_size,
         fill_holes=not args.no_fill_holes,
+        small_component_mode="always" if args.legacy_postproc else "reassign",
+        fill_holes_axial=args.legacy_postproc,
     )
 
     n_folds = config["data"].get("n_folds", 5)
@@ -357,7 +399,8 @@ def main():
     # ── run WITHOUT post-processing ───────────────────────────────────────────
     console.print("[bold]Pass 1 — Raw (no post-processing)[/bold]")
     df_raw = evaluate(models, eval_loader, config, device,
-                      use_tta=args.tta, use_postproc=False)
+                      use_tta=args.tta, use_postproc=False,
+                      sw_mode=args.sw_mode, tta_average=args.tta_average)
     mean_raw = print_summary(df_raw, "Raw Ensemble", config)
 
     # ── run WITH post-processing ──────────────────────────────────────────────
@@ -370,7 +413,8 @@ def main():
                       f"hole_fill={not args.no_fill_holes})[/bold]")
         df_pp = evaluate(models, eval_loader, config, device,
                          use_tta=args.tta, use_postproc=True,
-                         postproc_kwargs=postproc_kwargs)
+                         postproc_kwargs=postproc_kwargs,
+                         sw_mode=args.sw_mode, tta_average=args.tta_average)
         mean_pp = print_summary(df_pp, "Post-Processed", config)
         results["postprocessed"] = df_pp
 
