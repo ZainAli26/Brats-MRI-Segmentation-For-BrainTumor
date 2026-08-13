@@ -79,3 +79,42 @@ measured — without that number, a difference between the two end-to-end runs c
 told apart from noise.
 
 Results are written to `NNUNET_REPLICA.md` (§ Parity with native nnU-Net).
+
+## Gradient checkpointing (added 2026-08-13)
+
+`equiv_checks.py` runs with `grad_checkpointing=False` (line 130), and native nnU-Net has no
+gradient checkpointing at all — `nnUNetTrainer.py` contains zero uses of
+`torch.utils.checkpoint`. The wrapper in `network.py:57` is ours, and it is the only reason the
+11 GB plan fits an 8 GB card. So the path every 8 GB run takes was outside the proof above.
+
+`ckpt_checks.py` closes that gap — replica against replica, one set of weights and one batch run
+both ways, so nothing is confounded by RNG or data order. No native checkout or PYTHONPATH needed:
+
+    python3 tools/replica_parity/ckpt_checks.py --json nnunet_data/replica_parity/ckpt_results.json
+
+Result, 5/5 on the RTX 3070 Laptop at batch 1, plan `nnUNetResEncUNetMPlans_8G_cmp.json`:
+
+| check | result |
+|---|---|
+| forward, eval, fp32 | bitwise `0.000e+00` |
+| **gradients, fp32, cudnn deterministic** | **bitwise `0.000e+00` across 101,945,177 values** |
+| gradients, AMP + cudnn.benchmark | abs `3.3e-06`, relative `1.1e-04` |
+| weights after 3 SGD steps (AMP, clip 12, momentum 0.99) | `3.8e-05` across 383,074,841 values |
+| peak VRAM allocated | 5.78 GiB stored vs 4.56 GiB recomputed |
+
+The fp32 row is the conclusion: recomputation is **mathematically exact**, so checkpointing is
+not an approximation and a checkpointed local run is comparable to a non-checkpointed cloud run.
+The AMP row is fp16 accumulation order plus cuDNN algorithm selection on the recomputed forward —
+benign, and it disappears under `cudnn.deterministic`.
+
+Two traps this test hit, worth remembering if extending it:
+
+- A `sum`-based synthetic objective over five full-resolution deep-supervision heads produces
+  gradients that overflow fp16. `GradScaler` then skips every optimiser step, both nets stay at
+  their initial weights, and the weights-after-N-steps check reports a perfect match while
+  testing nothing. Use `mean`, verify the loss scale never dropped, and assert the weights
+  actually moved from init.
+- Compare gradients *relatively*. An absolute `1e-1` is structural on gradients of size `1e-1`
+  and pure rounding on gradients of size `1e4`.
+- Two 101.9M-parameter nets plus SGD momentum buffers do not fit 8 GB together; build, run and
+  free one at a time and compare state_dicts on the CPU.

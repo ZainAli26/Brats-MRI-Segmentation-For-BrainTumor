@@ -618,18 +618,60 @@ the compute.
 
 ---
 
-## 8. The native nnU-Net run
+## 8. The native nnU-Net run — standalone, native-first ordering
 
-**Check the Windows box first.** A native ResEnc run on Dataset102 at the same
-`-gpu_memory_target 11` plan is already scheduled on the 4070 SUPER (task `nnunet_11g`,
-folds 0–4, log `nnunet_data\run_11g_*.log`). If that has finished, the parity anchor
-exists and repeating it on the 4090 buys nothing.
+Running native **first** on the cloud box is a reasonable plan: it is the one thing an 8 GB
+card cannot do at the 11 GB plan, so it uses the rental for what only the rental can deliver
+while the laptop screens replica configs in parallel.
 
-That gives you two genuinely different options for the 4090's native slot:
+Follow §§0–4 first (install, auth, data pull, layout). You do **not** need the replica caches
+from §6 — native builds its own preprocessed set. Then work straight down this section.
 
-**Option 1 — parity (recommended if the Windows run is unfinished or at risk).** Same
-11 GB plan as the replica, so exp20 fold 0 and native fold 0 are directly comparable.
-That comparison is the entire justification for the replica loop.
+### Timing — what to expect on a 15 vCPU box
+
+| stage | time | notes |
+|---|---|---|
+| convert + verify integrity | ~30–60 min | one-off, CPU |
+| plan + preprocess 1621 cases | ~1.5–3 h | one-off, CPU, `-np` = vCPU |
+| **10-epoch probe** | **~15–40 min** | **do this before committing to a fold** |
+| train 1 fold, 1000 epochs | **~1–3 days** | see below |
+| train 1 fold, 250 epochs | ~6–18 h | `-tr nnUNetTrainer_250epochs` |
+| predict + evaluate held-out test | ~1–2 h | per fold set |
+
+The 1–3 day spread is real uncertainty, and it comes from the augmentation backend:
+
+- nnU-Net **2.4.2** (the parity target) uses `batchgenerators` — numpy/scipy, the same
+  ~11 s/batch our replica pays. At 13 workers that is ~0.85 s/iter → ~255 s/epoch → **~71 h
+  per fold**.
+- nnU-Net **2.5+** (what `requirements.txt` installs) moved to `batchgeneratorsv2` with
+  torch-based transforms, which attacks exactly this bottleneck. If it is ~3× faster the GPU
+  becomes the limit at ~0.16 s/iter → **~25 h per fold**.
+
+Native also has two speed advantages our replica lacks: no gradient checkpointing (nothing to
+recompute) and `torch.compile` on by default (worth ~1.15×). Neither helps while augmentation
+is the bottleneck. **Run the 10-epoch probe and read the real number** rather than picking a
+point in that range.
+
+### Budget-matching, before you start
+
+If the replica screening tier runs at **250 epochs**, run native at 250 too
+(`-tr nnUNetTrainer_250epochs`). Comparing a 1000-epoch native run to a 250-epoch exp20 says
+more about poly-LR annealing than about the engine. nnU-Net's default is 1000.
+
+### Is this run even necessary?
+
+**Parity is already proven** — `tools/replica_parity/` established that the replica computes
+what native 2.4.2 computes (bitwise-identical preprocessing and augmentation; weights after 3
+SGD steps identical to `0.000e+00` across 383,074,841 values), and as of 2026-08-13
+`ckpt_checks.py` extends that to the gradient-checkpointed path. So this run is a reported
+datapoint, **not a gate** on the replica series. Also check the Windows 4070 SUPER first — it
+is already running a native 11G 5-fold on Dataset102 (task `nnunet_11g`, folds 0–4, log
+`nnunet_data\run_11g_*.log`). If that has finished, this run duplicates it, and the slot is
+better spent on Option 2 below. Either way, do not block exp20–27 on it.
+
+### Option 1 — match the replica's 11 GB plan (the comparable run)
+
+Same plan as exp20, so native fold 0 and exp20 fold 0 are directly comparable.
 
 **First check which nnU-Net you actually have** — the planner class names differ by version
 and the script hardcodes the newer ones:
@@ -680,25 +722,82 @@ nnUNetv2_plan_and_preprocess -d 102 \
   -pl nnUNetPlannerResEncM \
   -gpu_memory_target 11 \
   -overwrite_plans_name nnUNetResEncUNetPlans_11G \
-  -c 3d_fullres --verify_dataset_integrity --verbose
+  -c 3d_fullres -np 13 --verify_dataset_integrity --verbose
 
 # 4. Re-assert OUR patient-level folds — planning regenerates splits_final.json
 #    with nnU-Net's own random KFold and would silently break comparability.
 cp $nnUNet_raw/Dataset102_BraTS2024ResEnc/splits_final.json \
    $nnUNet_preprocessed/Dataset102_BraTS2024ResEnc/splits_final.json
 
-# 5. Train fold 0
-nnUNetv2_train 102 3d_fullres 0 -p nnUNetResEncUNetPlans_11G -tr nnUNetTrainer --npz
+# 4b. VERIFY THE PLAN BEFORE TRAINING. If this is not patch [128,192,128] / batch 2, the
+#     parity claim is void and you would waste days finding out.
+python -c "
+import json, os
+p = os.path.expandvars('\$nnUNet_preprocessed/Dataset102_BraTS2024ResEnc/nnUNetResEncUNetPlans_11G.json')
+c = json.load(open(p))['configurations']['3d_fullres']
+print('patch', c['patch_size'], 'batch', c['batch_size'])
+assert list(c['patch_size']) == [128,192,128] and c['batch_size'] == 2, 'PLAN MISMATCH'
+print('OK — matches the replica plan')"
+
+# 5a. TIMING PROBE — 10 epochs, ~15-40 min. Replaces the 1-3 day estimate above
+#     with a real number. Multiply the reported epoch time by your target epoch count.
+export nnUNet_n_proc_DA=13          # 15 vCPU - 2; nnU-Net's own default is only 12
+nnUNetv2_train 102 3d_fullres 0 -p nnUNetResEncUNetPlans_11G \
+  -tr nnUNetTrainer_10epochs --npz
+
+# 5b. Then the real run, detached. 250 epochs to match a 250-epoch replica screening tier:
+nohup nnUNetv2_train 102 3d_fullres 0 -p nnUNetResEncUNetPlans_11G \
+  -tr nnUNetTrainer_250epochs --npz \
+  > /workspace/logs/native_fold0.log 2>&1 &
+
+#     ...or nnU-Net's default 1000 epochs with plain `-tr nnUNetTrainer`.
+#     Resume after any interruption by appending --c to the same command.
 ```
 
-Confirm before training that `$nnUNet_preprocessed/Dataset102_BraTS2024ResEnc/nnUNetResEncUNetPlans_11G.json`
-reports **patch_size [128,192,128], batch_size 2**. If it does not, the parity claim is void.
+Read the per-epoch time from the log (nnU-Net prints `Epoch time:` each epoch) and sanity-check
+it against the table above before leaving it running for days.
 
-Then bridge the results into the shared metrics with steps 4–5 of the script
-(`evaluate_nnunet_kfold.py` and `evaluate_nnunet.py`), passing
-`-p nnUNetResEncUNetPlans_11G`.
+### After training — bridge into the shared metrics (applies to either option)
 
-**Option 2 — ResEnc-L at 24 GB.** `run_resenc_5fold.sh` defaults to `--preset L`, which is
+nnU-Net writes its own metrics in its own format; these two scripts convert the predictions
+into the same Dice/HD95 tables the replica experiments produce, so the numbers are comparable.
+
+```bash
+TR=nnUNetTrainer_250epochs            # must match what you trained with
+PLANS=nnUNetResEncUNetPlans_11G
+RES=$nnUNet_results/Dataset102_BraTS2024ResEnc/${TR}__${PLANS}__3d_fullres
+DATA=../Brats2024/training_all
+
+# 6a. Out-of-fold CV metric. --n_folds 1 if you only trained fold 0.
+python nnunet_native/evaluate_nnunet_kfold.py \
+  --results_dir "$RES" \
+  --data_dir "$DATA" \
+  --output_dir runs/native_11g_cv_eval \
+  --n_folds 1
+
+# 6b. Held-out test set — the seed-42 patients kept out of every fold.
+mkdir -p "$RES/test_predictions"
+nnUNetv2_predict \
+  -i $nnUNet_raw/Dataset102_BraTS2024ResEnc/imagesTs \
+  -o "$RES/test_predictions" \
+  -d 102 -c 3d_fullres -p $PLANS -tr $TR -f 0
+
+python nnunet_native/evaluate_nnunet.py \
+  --pred_dir "$RES/test_predictions" \
+  --data_dir "$DATA" \
+  --output_dir runs/native_11g_test_eval
+```
+
+`-f 0` predicts with fold 0 alone. Pass `-f 0 1 2 3 4` only once all five folds exist — an
+ensemble of one fold and an ensemble of five are not comparable numbers.
+
+Post-processing: `evaluate_nnunet_kfold.py` takes `--postprocess` / `--postprocessing_json`.
+Determine post-processing on the **CV** output and only then apply it to the test set — never
+determine it on the test split.
+
+### Option 2 — ResEnc-L at 24 GB (a different question)
+
+`run_resenc_5fold.sh` defaults to `--preset L`, which is
 designed for a 24 GB card and is the one thing the 4090 can do that neither the 3070 nor
 the 4070 SUPER can. L gives patch [160,192,160], batch 3.
 
@@ -772,20 +871,52 @@ it when the series is done, along with the GCS bucket
 
 ---
 
-## 11. Cost summary
+## 11. Cost — and why the original budget was wrong
 
-At the plan's assumed ~$0.60/h for a community-cloud 4090:
+**Correction (2026-08-13).** The cloud plan's ~$130–150 budget rested on ~48 s/epoch. That
+figure is the *GPU-bound* floor, and reaching it needs `11 s ÷ 0.16 s ≈ 70 workers`. **No
+consumer-GPU cloud offer ships 70 vCPU**, so the plan was never achievable at that price.
+Real cost scales with vCPU, not with the GPU:
 
-| stage | GPU time | cost |
-|---|---|---|
-| Tier 1 — exp20, 5 folds × 1000 ep | ~67 h | ~$40 |
-| Tier 2 — 6 screening runs, fold 0 × 250 ep | ~20 h | ~$12–15 |
-| Tier 3 — 1–2 promotions, 5 folds × 1000 ep | ~134 h | ~$80 |
-| Native nnU-Net, fold 0 | ~14 h | ~$9 |
-| Network volume 500 GB | continuous | check current RunPod rate |
-| GCS egress, one full pull | — | ~$10.50 |
+| vCPU | s/iter | s/epoch | 1 fold × 1000 ep | exp20 5-fold |
+|---|---|---|---|---|
+| 5 | ~2.75 | ~830 | ~230 h | ~48 days |
+| 12 | ~1.10 | ~330 | ~92 h | ~19 days |
+| **15** | **~0.85** | **~255** | **~71 h** | **~15 days** |
+| 24–32 | ~0.37 | ~120 | ~33 h | ~7 days |
+| ~70 (unobtainable) | ~0.16 | ~48 | ~13 h | ~2.8 days |
 
-**~$150 total.** Every row scales off the estimated 3× speedup over the 3070 and the
-repo's own ~2× no-checkpointing claim — neither measured on cloud hardware. Section 5's
-ten-epoch check replaces both estimates with a real number for about a dollar. Do it
-before booking Tier 1.
+For reference the 3070 laptop sits at ~1.09 s/iter, so **16 vCPU is the break-even point
+where renting beats the local box at all.**
+
+At 15 vCPU the full staged plan (Tier 1 + screening + two promotions + native) is roughly
+1200 GPU-hours ≈ **$700–1000**, not $150.
+
+**This is not a defect in the setup.** nnU-Net's own default is 12 workers, so reference
+nnU-Net runs on fast GPUs are augmentation-bound too. Being CPU-bound here is faithful
+behaviour, not a misconfiguration — which also means it cannot be tuned away without
+deviating from the replica.
+
+### Scoping to a real budget
+
+Since cost scales with epochs × folds, cut those rather than accepting a 50-day rental:
+
+| plan | what | GPU time | ~cost at $0.80/h |
+|---|---|---|---|
+| **Screening only** (recommended first) | all 8 replica configs, fold 0 × 250 ep | ~145 h | ~$115 |
+| + native parity, fold 0 × 250 ep | adds the engine check | ~+18 h | ~+$15 |
+| + one winner at 5 folds × 1000 ep | the only full-budget run | ~+355 h | ~+$285 |
+| Everything as originally planned | Tiers 1–3 at full budget | ~1200 h | ~$960 |
+
+The screening tier answers every *ranking* question — 5th channel, loss, architecture,
+synthetic data — for ~$115. Only one configuration then needs the full 5-fold × 1000-epoch
+treatment, and that run can just as well go on the local 3070 over ~19 days for free while
+the rented box does the next screening batch.
+
+**Caveat that applies to all of the above:** the ~11 s/batch augmentation cost was measured
+on the local box's cores and cloud per-core speed differs. Section 5's ten-epoch measurement
+replaces every number in this section with a real one for about a dollar. Run it before
+booking anything long.
+
+Fixed costs on top: network volume storage (continuous, check current rate) and ~$10.50 of
+GCS egress per full data pull to a non-GCP box.
