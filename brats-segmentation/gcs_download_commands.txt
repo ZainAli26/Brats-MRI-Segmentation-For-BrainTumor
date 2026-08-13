@@ -5,7 +5,7 @@ Bucket state as of 2026-08-13 (project <your-project>):
 
   gs://<your-bucket>/tar/training_data1_v2.tar          42.6 GiB   8,100 files
   gs://<your-bucket>/tar/training_data_additional.tar    6.3 GiB   1,626 files
-  gs://<your-bucket>/tar/synthetic_regaug.tar           38.8 GiB   8,809 files   (exp27 only)
+  gs://<your-bucket>/tar/synthetic_regaug.tar           38.8 GiB   8,808 files   (exp27 only)
                                                           -------
                                                           87.7 GiB
 
@@ -138,13 +138,19 @@ Drop synthetic_regaug from the loop unless you are running exp27 — it is 39 GB
 -------------------------------------------------------------------------------
 find /workspace/Brats2024/training_data1_v2        -name '*.nii.gz' | wc -l   # expect 8100
 find /workspace/Brats2024/training_data_additional -name '*.nii.gz' | wc -l   # expect 1626
-find /workspace/Brats2024/synthetic_regaug         -name '*.nii.gz' | wc -l   # expect 8809
+find /workspace/Brats2024/synthetic_regaug         -name '*.nii.gz' | wc -l   # expect 8808
+
+Counted on the source data 2026-08-13. Note synthetic is 8808, not the 8809 that
+`gcloud storage ls -r **| wc -l` reports — that command counts one extra line for the
+prefix itself. 1468 cases x 6 files = 8808.
 
 du -sh /workspace/Brats2024/*
 ls /workspace/Brats2024/training_data1_v2 | head -3
 ls /workspace/Brats2024/training_data1_v2 | wc -l                             # 1350 patients
 
-Each patient dir must hold 5 files: -t1c -t1n -t2f -t2w -seg. Spot-check one:
+Each patient dir holds 6 files: -t1c -t1n -t2f -t2w -seg AND -sub (the T1Gd-T1
+subtraction channel the 5-channel experiments need — already precomputed and included in
+the tarballs, for the synthetic cases too). Spot-check one:
 ls /workspace/Brats2024/training_data1_v2/BraTS-GLI-02921-101/
 
 `tar -xf` exits non-zero on a truncated archive, so a clean exit + the counts above is

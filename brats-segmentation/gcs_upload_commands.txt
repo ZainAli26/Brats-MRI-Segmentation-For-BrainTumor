@@ -10,7 +10,7 @@ Environment as of 2026-08-11:
 What needs to move (~88 GB, ~18.5k files):
 
   ../Brats2024/training_data1_v2          43 GB    8,100 files
-  ../Brats2024/synthetic_regaug           39 GB    8,809 files    (exp27 only)
+  ../Brats2024/synthetic_regaug           39 GB    8,808 files    (exp27 only)
   ../Brats2024/training_data_additional  6.4 GB    1,626 files
 
 Use `gcloud storage`, not `gsutil`. It parallelizes by default and is several times
@@ -69,7 +69,7 @@ On a flaky link prefer option A.
 
 gcloud storage du -s $BUCKET/Brats2024/*
 gcloud storage ls -r $BUCKET/Brats2024/training_data1_v2/** | wc -l    # expect 8100
-gcloud storage ls -r $BUCKET/Brats2024/synthetic_regaug/**   | wc -l    # expect 8809
+gcloud storage ls -r $BUCKET/Brats2024/synthetic_regaug/**   | wc -l    # expect 8809 (ls -r counts the prefix line; the real file count is 8808)
 
 -------------------------------------------------------------------------------
 3. PULL ON THE GPU BOX
