@@ -1,0 +1,165 @@
+GCS — pull the BraTS training data onto a new (rented) GPU server: commands
+Companion to gcs_upload_commands.txt. Verified against the live bucket on 2026-08-13.
+
+Bucket state as of 2026-08-13 (project <your-project>):
+
+  gs://<your-bucket>/tar/training_data1_v2.tar          42.6 GiB   8,100 files
+  gs://<your-bucket>/tar/training_data_additional.tar    6.3 GiB   1,626 files
+  gs://<your-bucket>/tar/synthetic_regaug.tar           38.8 GiB   8,809 files   (exp27 only)
+                                                          -------
+                                                          87.7 GiB
+
+  gs://<your-bucket>/Brats2024/...  IGNORE. Option A (directory copy) was aborted;
+  only 5 objects / ~230 KB landed there. The tarballs are the complete copy.
+
+Paths INSIDE each tar are already `Brats2024/<dataset>/...` — tar stripped the leading
+`../` at creation time. So extract with `-C <parent>`, NOT `-C <parent>/Brats2024`, or you
+get Brats2024/Brats2024/.
+
+Substitute your own values for <your-bucket> and <your-project> throughout.
+
+-------------------------------------------------------------------------------
+0. ON THE NEW SERVER — INSTALL gcloud
+-------------------------------------------------------------------------------
+Debian/Ubuntu box (RunPod/Vast images are usually Ubuntu, often as root, no sudo needed):
+
+curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts --install-dir=$HOME
+export PATH="$HOME/google-cloud-sdk/bin:$PATH"
+
+Verify:  gcloud --version
+
+-------------------------------------------------------------------------------
+1. AUTH — service account, not your user credentials
+-------------------------------------------------------------------------------
+Do this ONCE on THIS (local) machine to mint a read-only key:
+
+  gcloud config set project <your-project>
+  gcloud iam service-accounts create brats-puller --display-name="BraTS read-only puller"
+  gcloud storage buckets add-iam-policy-binding gs://<your-bucket> \
+      --member="serviceAccount:brats-puller@<your-project>.iam.gserviceaccount.com" \
+      --role="roles/storage.objectViewer"
+  gcloud iam service-accounts keys create ~/brats-puller-key.json \
+      --iam-account=brats-puller@<your-project>.iam.gserviceaccount.com
+
+Ship it to the box and activate:
+
+  scp -P <port> ~/brats-puller-key.json root@<host>:/root/key.json     # local
+  gcloud auth activate-service-account --key-file=/root/key.json       # on the box
+  gcloud config set project <your-project>
+
+The key is a bearer credential on a rented machine you don't own — delete it after the
+pull (`shred -u /root/key.json`) and revoke when the box is returned:
+  gcloud iam service-accounts keys list --iam-account=brats-puller@<your-project>.iam.gserviceaccount.com
+  gcloud iam service-accounts keys delete <KEY_ID> --iam-account=brats-puller@<your-project>.iam.gserviceaccount.com
+
+No-gcloud fallback (token valid ~1 h, minted locally, no key file on the box):
+  # local:
+  gcloud auth print-access-token
+  # on the box:
+  export TOK=<paste>
+  curl -H "Authorization: Bearer $TOK" \
+    "https://storage.googleapis.com/storage/v1/b/<your-bucket>/o/tar%2Ftraining_data1_v2.tar?alt=media" \
+    | tar -xf - -C /workspace
+  (the object name must be URL-encoded: tar/x.tar -> tar%2Fx.tar)
+
+-------------------------------------------------------------------------------
+2. PULL — option A: download to disk, then extract  (RECOMMENDED)
+-------------------------------------------------------------------------------
+Resumable and sliced (gcloud splits a large object into parallel ranges), so it saturates
+the link and survives a dropped connection. Needs ~176 GB free: 88 tar + 88 extracted.
+
+export BUCKET=gs://<your-bucket>
+export DEST=/workspace                 # parent dir; Brats2024/ is created inside it
+mkdir -p $DEST/tar $DEST
+
+df -h $DEST                            # check free space BEFORE starting
+
+gcloud storage cp $BUCKET/tar/training_data1_v2.tar        $DEST/tar/
+gcloud storage cp $BUCKET/tar/training_data_additional.tar $DEST/tar/
+gcloud storage cp $BUCKET/tar/synthetic_regaug.tar         $DEST/tar/   # exp27 only
+
+tar -xf $DEST/tar/training_data1_v2.tar        -C $DEST
+tar -xf $DEST/tar/training_data_additional.tar -C $DEST
+tar -xf $DEST/tar/synthetic_regaug.tar         -C $DEST
+
+rm -rf $DEST/tar                       # reclaim 88 GB once verified (section 4)
+
+Interrupted mid-download? Re-run the same `cp` — it resumes from the tracker file.
+
+-------------------------------------------------------------------------------
+2. PULL — option B: stream straight into tar  (no scratch space)
+-------------------------------------------------------------------------------
+Use when the box only has ~100 GB of disk. Single stream, and NOT resumable — a dropped
+connection means restarting that tarball from byte 0.
+
+export BUCKET=gs://<your-bucket>
+export DEST=/workspace
+mkdir -p $DEST
+
+gcloud storage cat $BUCKET/tar/training_data1_v2.tar        | tar -xf - -C $DEST
+gcloud storage cat $BUCKET/tar/training_data_additional.tar | tar -xf - -C $DEST
+gcloud storage cat $BUCKET/tar/synthetic_regaug.tar         | tar -xf - -C $DEST
+
+With a progress bar (apt-get install -y pv):
+  gcloud storage cat $BUCKET/tar/training_data1_v2.tar | pv -s 45752504320 | tar -xf - -C $DEST
+
+-------------------------------------------------------------------------------
+3. RUN IT DETACHED — the pull outlives the ssh session
+-------------------------------------------------------------------------------
+88 GB takes tens of minutes to hours; do not hold it in a foreground ssh session.
+
+cat > /workspace/pull_brats.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="$HOME/google-cloud-sdk/bin:$PATH"
+BUCKET=gs://<your-bucket>
+DEST=/workspace
+mkdir -p "$DEST/tar"
+for f in training_data1_v2 training_data_additional synthetic_regaug; do
+    echo "=== $f: downloading $(date -Is) ==="
+    gcloud storage cp "$BUCKET/tar/$f.tar" "$DEST/tar/"
+    echo "=== $f: extracting $(date -Is) ==="
+    tar -xf "$DEST/tar/$f.tar" -C "$DEST"
+    rm -f "$DEST/tar/$f.tar"          # free each tar as soon as it is unpacked
+done
+echo "=== done $(date -Is) ==="
+EOF
+chmod +x /workspace/pull_brats.sh
+nohup /workspace/pull_brats.sh > /workspace/pull_brats.log 2>&1 &
+
+tail -f /workspace/pull_brats.log
+
+Deleting each tar right after its own extract keeps the peak at ~88 GB + the largest tar
+(~43 GB) instead of 176 GB. Trade-off: a failed extract means re-downloading that one tar.
+Drop synthetic_regaug from the loop unless you are running exp27 — it is 39 GB of the 88.
+
+-------------------------------------------------------------------------------
+4. VERIFY ON THE BOX
+-------------------------------------------------------------------------------
+find /workspace/Brats2024/training_data1_v2        -name '*.nii.gz' | wc -l   # expect 8100
+find /workspace/Brats2024/training_data_additional -name '*.nii.gz' | wc -l   # expect 1626
+find /workspace/Brats2024/synthetic_regaug         -name '*.nii.gz' | wc -l   # expect 8809
+
+du -sh /workspace/Brats2024/*
+ls /workspace/Brats2024/training_data1_v2 | head -3
+ls /workspace/Brats2024/training_data1_v2 | wc -l                             # 1350 patients
+
+Each patient dir must hold 5 files: -t1c -t1n -t2f -t2w -seg. Spot-check one:
+ls /workspace/Brats2024/training_data1_v2/BraTS-GLI-02921-101/
+
+`tar -xf` exits non-zero on a truncated archive, so a clean exit + the counts above is
+sufficient; there is no per-file checksum to compare against.
+
+-------------------------------------------------------------------------------
+5. AFTER THE PULL
+-------------------------------------------------------------------------------
+shred -u /root/key.json                      # remove the credential from the rented box
+rm -rf /workspace/tar                        # if any tar survived the loop
+
+Preprocess ON the box — the cache is ~34 GB and regenerating it is far cheaper than
+moving it. Point data.cache_dir at local disk or training is I/O-bound at 0% GPU.
+
+Cost note: this is ~$10.50 of GCS egress per full pull to a non-GCP box (88 GB x $0.12),
+and it recurs for every box you rent. If you expect to re-rent, keep the extracted tree on
+the provider's persistent volume rather than pulling again. On a GCP VM in us-central1
+(same region as the bucket) egress is free.
