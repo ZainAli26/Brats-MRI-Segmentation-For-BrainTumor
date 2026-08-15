@@ -52,6 +52,23 @@ MODALITY_MAP = {
     "t2w": "0002",  # T2 weighted
     "t2f": "0003",  # T2 FLAIR
 }
+CHANNEL_NAMES = {"0": "T1n", "1": "T1c", "2": "T2w", "3": "T2f"}
+
+# Optional 5th channel: the precomputed t1c-minus-t1n subtraction map — the treatment under
+# test in exp27. Opt-in via --with_sub, so every existing 4-channel dataset is untouched.
+# enable_sub() flips the module-level maps once at startup rather than threading a parameter
+# through, so that every consumer — _link_case_images, both convert_* paths, and any script
+# importing them — sees ONE channel set. Real and synthetic cases must agree: a case missing
+# a modality is silently skipped (see _link_case_images), so a mismatch would quietly drop
+# cases instead of failing.
+SUB_MODALITY = {"sub": "0004"}
+SUB_CHANNEL_NAME = {"4": "SUB"}
+
+
+def enable_sub() -> None:
+    """Add the subtraction map as channel 4 for this process."""
+    MODALITY_MAP.update(SUB_MODALITY)
+    CHANNEL_NAMES.update(SUB_CHANNEL_NAME)
 
 # BraTS 2024 post-treatment labels are already contiguous (0=bg, 1=NETC, 2=SNFH,
 # 3=ET, 4=RC), so the remap is the identity. (The old {0:0,1:1,2:2,4:3} map was for
@@ -79,8 +96,9 @@ def remap_and_save_label(src_path: Path, dst_path: Path):
 
 
 def _link_case_images(case_dir: Path, images_dir: Path) -> bool:
-    """Symlink all 4 modalities for a case into nnU-Net layout.
+    """Symlink every modality in MODALITY_MAP for a case into nnU-Net layout.
 
+    That is 4 channels by default, 5 after enable_sub().
     Returns True if all modalities were found and linked, False otherwise.
     """
     for mod_suffix, channel_idx in MODALITY_MAP.items():
@@ -156,7 +174,7 @@ def convert_dataset_kfold(
 
     # --- dataset.json ---
     dataset_json = {
-        "channel_names": {"0": "T1n", "1": "T1c", "2": "T2w", "3": "T2f"},
+        "channel_names": dict(CHANNEL_NAMES),
         "labels": dict(DATASET_LABELS),
         "numTraining": len(training_entries),
         "file_ending": ".nii.gz",
@@ -268,12 +286,7 @@ def convert_dataset(
 
     # --- dataset.json ---
     dataset_json = {
-        "channel_names": {
-            "0": "T1n",
-            "1": "T1c",
-            "2": "T2w",
-            "3": "T2f",
-        },
+        "channel_names": dict(CHANNEL_NAMES),
         "labels": dict(DATASET_LABELS),
         "numTraining": len(training_entries),
         "file_ending": ".nii.gz",
@@ -328,7 +341,14 @@ if __name__ == "__main__":
                              "kfold = all data + N-fold patient split (exp19/exp18 replica)")
     parser.add_argument("--n_folds", type=int, default=5, help="Number of folds (kfold mode only)")
     parser.add_argument("--split_seed", type=int, default=42, help="Patient-split seed")
+    parser.add_argument("--with_sub", action="store_true",
+                        help="Add the precomputed -sub map as channel 4 (5-channel dataset, "
+                             "exp27). Every case must have *-sub.nii.gz or it is skipped.")
     args = parser.parse_args()
+
+    if args.with_sub:
+        enable_sub()
+        console.print("[cyan]5-channel mode: -sub added as channel 0004[/cyan]")
 
     if args.mode == "kfold":
         convert_dataset_kfold(

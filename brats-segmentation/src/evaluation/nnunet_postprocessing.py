@@ -96,6 +96,43 @@ def remove_all_but_largest(seg: np.ndarray, labels: Sequence[int]) -> np.ndarray
     return seg
 
 
+def remove_small_components(seg: np.ndarray, labels: Sequence[int],
+                            min_voxels: int) -> np.ndarray:
+    """Delete connected components of ``labels`` smaller than ``min_voxels``.
+
+    NOT an nnU-Net operation — nnU-Net never removes small components (see the module
+    docstring). This is the BraTS-community post-processing that the literature reports a
+    significant gain from, and it is the OPPOSITE logic to remove_all_but_largest:
+
+      remove_all_but_largest  deletes by RANK  — everything except the top component,
+                              so genuine satellite lesions are destroyed. Measured on this
+                              run's OOF set it made every region worse and was rejected.
+      remove_small_components deletes by SIZE  — only sub-threshold specks, leaving
+                              satellites intact.
+
+    It pays under a LESION-WISE metric, where each unmatched predicted component scores a
+    fresh 0.0 regardless of size. Under voxel-wise Dice a 20-voxel speck is worth ~0.001
+    and this will look like a no-op — measure it with src/evaluation/lesionwise.py.
+
+    Same 26-connectivity as the rest of this module. ``min_voxels <= 1`` is a no-op.
+    """
+    if min_voxels <= 1:
+        return seg
+    seg = seg.copy()
+    mask = np.isin(seg, list(labels))
+    if not mask.any():
+        return seg
+    labeled, n = cc_label(mask, structure=_full_connectivity(mask.ndim))
+    if n == 0:
+        return seg
+    sizes = np.bincount(labeled.ravel())
+    sizes[0] = 0
+    doomed = np.flatnonzero((sizes > 0) & (sizes < min_voxels))
+    if doomed.size:
+        seg[np.isin(labeled, doomed)] = 0
+    return seg
+
+
 def apply_postprocessing(seg: np.ndarray, ops: List[Sequence[int]]) -> np.ndarray:
     """Apply a determined operation list (each entry = a label set) in order."""
     for label_set in ops:
