@@ -57,6 +57,12 @@ def main():
     cases = json.load(open(args.per_case))
     splits = json.load(open(args.splits))
     regions, thresholds = _detect(cases)
+    if len(thresholds) < 2:
+        raise SystemExit(
+            f"ABORT: only thresholds {thresholds} detected in the per_case keys — a "
+            "one-point 'sweep' would cross-fit trivially. This file was probably written "
+            "by a script with a different key scheme (e.g. sweep_official_pp.py uses "
+            "'{tissue}|L{label}T{thr}|lw_dice', which this tool does not parse).")
 
     fold_of = {c: k for k, f in enumerate(splits) for c in f["val"]}
     unmapped = [c["case_id"] for c in cases if c["case_id"] not in fold_of]
