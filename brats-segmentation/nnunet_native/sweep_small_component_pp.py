@@ -119,7 +119,16 @@ def main():
     ap.add_argument("--thresholds", default=",".join(str(t) for t in DEFAULT_THRESHOLDS))
     ap.add_argument("--hd95", action="store_true", help="also compute lesion-wise HD95 (slow)")
     ap.add_argument("--limit", type=int, help="score only the first N cases (smoke test)")
+    ap.add_argument("--regions", help="override the scored regions, e.g. 'NETC:1,SNFH:2' or "
+                    "'TC:1+3' (labels joined with +). Default: the four BraTS composites. "
+                    "Workers see the override via fork, so this is Linux-only — like the Pool itself.")
     args = ap.parse_args()
+
+    if args.regions:
+        global REGIONS
+        REGIONS = {name: [int(x) for x in labels.split("+")]
+                   for name, labels in (part.split(":") for part in args.regions.split(","))}
+        print(f"regions overridden: {REGIONS}")
 
     thresholds = [int(t) for t in args.thresholds.split(",")]
     items = _collect(Path(args.results_dir), Path(args.data_dir), args.n_folds)
@@ -190,7 +199,7 @@ def main():
         print(f"{t:>7}{means[str(t)]:>19.4f}{vox_means[str(t)]:>18.4f}   {pr}{star}")
     print(f"\nmean false-positive lesions per case (the term this attacks):")
     for r in REGIONS:
-        print(f"  {r:<4}" + "  ".join(f"N={t}: {summary[r][str(t)]['n_fp']:.2f}" for t in thresholds))
+        print(f"  {r:<5} " + "  ".join(f"N={t}: {summary[r][str(t)]['n_fp']:.2f}" for t in thresholds))
     if sig:
         print(f"\npaired Wilcoxon, threshold {best_t} vs raw:")
         for k, v in sig.items():
