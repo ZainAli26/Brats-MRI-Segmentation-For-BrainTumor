@@ -1,8 +1,9 @@
 """exp25 as native nnU-Net: MONAI SegResNetDS instead of the planned ResEnc U-Net.
 
-exp25 is exp20 with ONE change — the network becomes SegResNetDS (Myronenko's BraTS-winner
-family, the MONAI Auto3DSeg default) while data, plans-derived patch/batch, splits, loss
-(Dice+CE), optimizer, schedule and the 750-epoch budget all stay exp20's:
+exp25 is exp20 with the network swapped to SegResNetDS (Myronenko's BraTS-winner family,
+the MONAI Auto3DSeg default) AND its optimizer swapped to the one that family is trained
+with — AdamW lr 2e-4, weight decay 1e-5 (poly schedule and everything else kept). Data,
+plans-derived patch/batch, splits, loss (Dice+CE) and the 750-epoch budget stay exp20's:
 
     exp20:  ResEnc U-Net 102.4M   (nnUNetTrainer_750epochs,  -p nnUNetResEncUNetPlans_11G)
     exp24:  shallow ResEnc 31.4M  (nnUNetTrainer_750epochs,  -p nnUNetResEncShallow_11G)
@@ -12,6 +13,16 @@ The plan's architecture entry is deliberately ignored — the plan still supplie
 [128, 192, 128], batch size 2, the preprocessed data identifier (nnUNetPlans_3d_fullres,
 shared cache, zero re-preprocessing) and the fold splits. nnU-Net keys the results
 directory off the trainer name, so this coexists with exp20/exp22/exp24 under Dataset104.
+
+Why not exp20's SGD: the first attempt (2026-08-25, fold 0) inherited nnU-Net's
+SGD lr 0.01 / momentum 0.99 / nesterov and DIVERGED — train loss climbed monotonically
+from 0.33 (epoch 1) to ~8-9 by epoch ~15 and never recovered through epoch 46+ (run
+preserved at /workspace/diverged_runs/exp25_fold0_sgd_diverged). That recipe is tuned
+for nnU-Net's own architectures; MONAI/Auto3DSeg trains SegResNetDS with AdamW ~2e-4,
+which is what configure_optimizers uses below. The comparison framing is therefore
+"each architecture under a recipe that works for it", not a pure single-variable swap.
+AdamW's second moment buffer adds ~350 MB optimizer state over SGD (87M params) —
+still well inside the 11 G budget next to the measured 8.15 GiB SGD peak.
 
 Config: init_filters=32, blocks_down=(1,2,2,4,4), instance norm, relu, deconv upsampling,
 dsdepth=4 — 87,168,244 params. Five resolution stages (vs the plan's six): a sixth
@@ -49,6 +60,7 @@ import torch
 from monai.networks.nets import SegResNetDS
 from torch._dynamo import OptimizedModule
 
+from nnunetv2.training.lr_scheduler.polylr import PolyLRScheduler
 from nnunetv2.training.nnUNetTrainer.variants.training_length.nnUNetTrainer_Xepochs import (
     nnUNetTrainer_750epochs,
 )
@@ -103,7 +115,23 @@ class SegResNetDSFlagged(SegResNetDS):
 
 
 class nnUNetTrainerSegResNetDS_750epochs(nnUNetTrainer_750epochs):
-    """Identical to nnUNetTrainer_750epochs except the network is SegResNetDS (87.2M)."""
+    """nnUNetTrainer_750epochs with SegResNetDS (87.2M) and its native AdamW recipe.
+
+    SGD 0.01/0.99 diverged on this net (see module docstring); AdamW lr 2e-4 wd 1e-5 is
+    the MONAI Auto3DSeg recipe for SegResNetDS. The poly LR schedule is kept.
+    """
+
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device)
+        self.initial_lr = 2e-4
+        self.weight_decay = 1e-5
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(self.network.parameters(), self.initial_lr,
+                                      weight_decay=self.weight_decay)
+        lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
+        return optimizer, lr_scheduler
 
     @staticmethod
     def build_network_architecture(
