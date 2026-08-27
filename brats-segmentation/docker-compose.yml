@@ -26,8 +26,18 @@ x-gpu-common: &gpu-common
   volumes:
     - ../Brats2024:/data/Brats2024:ro
     - ../Brats2023:/data/Brats2023:ro
+    # exp27 only: data.synthetic_train_dirs is read from the YAML and has NO CLI override
+    # (src/nnunet_replica/splits.py:70), so the literal string ../Brats2024/synthetic_regaug
+    # has to resolve from WORKDIR=/app — i.e. /Brats2024 must exist in the container.
+    # Without this mount exp27 dies with FileNotFoundError before the first epoch.
+    - ../Brats2024:/Brats2024:ro
     - ./runs:/app/runs
     - ./.cache:/app/.cache
+    # replica.preprocessed_dir is hardcoded to /app/.cache/replica/... in every config.
+    # Point REPLICA_CACHE at wherever the caches actually live if that is not ./.cache/replica
+    # (e.g. when the host .cache is root-owned from an earlier container run):
+    #   REPLICA_CACHE=/home/<user>/brats_replica_cache docker-compose run --rm replica-train
+    - ${REPLICA_CACHE:-./.cache/replica}:/app/.cache/replica
     - ./nnunet_data:/app/nnunet_data
     # Live-mount source so code edits don't need a rebuild
     - ./src:/app/src

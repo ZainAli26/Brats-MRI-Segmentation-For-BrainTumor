@@ -34,6 +34,9 @@ brats-segmentation/.cache
 # Reproducible by re-running training; can be very large.
 # -----------------------------------------------------------------------------
 brats-segmentation/runs/
+# Same thing, written by the docker-compose local runs (./runs is root-owned from an
+# earlier container run, so LOCAL_RUN_STATE.md points training at runs_local instead).
+brats-segmentation/runs_local/
 
 # -----------------------------------------------------------------------------
 # GENERATED OUTPUTS — all files in output/ are fully reproducible by running
@@ -135,3 +138,6 @@ Icon?
 
 # Stray shell-redirect output file (e.g. `docker-compose run ... > out`)
 brats-segmentation/out
+
+# docker-compose local env (machine-specific paths)
+.env
