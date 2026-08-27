@@ -97,9 +97,9 @@ also spawns `num_workers//2` validation workers that stay resident, so budget
 | Largest tarball, transient during pull | +43 GB peak | always |
 | `training_data1_v2` + `_additional` | ~50 GB | always |
 | `.cache/replica/Dataset102_4ch` | ~46 GB | exp20/22/24/25/26 |
-| `.cache/replica/Dataset102_5ch` | ~57 GB | exp21/23/27 |
+| `.cache/replica/Dataset102_5ch`, real cases only | **~60 GB** | exp21/23 |
 | `Brats2024/synthetic_regaug` | ~40 GB | exp27 only |
-| ...plus synthetic cases in the 5ch cache | ~34 GB | exp27 only |
+| ...plus synthetic cases in the 5ch cache | **~54 GB** | exp27 only |
 | `nnunet_data/` (raw + preprocessed + results) | ~120 GB | native run only |
 | `runs/` checkpoints, whole series | ~60 GB | always (1.2 GB × 3 per fold) |
 
@@ -111,10 +111,19 @@ Which gives three sensible volume sizes:
 | + exp27 | ~310 GB | **400 GB** |
 | + native nnU-Net | ~430 GB | **500 GB** |
 
-Only the 4ch cache figure is measured (29 MB/case × 1621); the 5ch numbers scale it by 5/4
-and the nnU-Net native figure is an estimate — hence the headroom in each tier. Note the
-transient tarball line assumes the section-4 pull loop that deletes each tar right after
-its own extract; downloading all three first needs 88 GB instead of 43 GB.
+Both replica cache figures are now measured: **4ch 29 MB/case, 5ch 37 MB/case** (the latter
+during a real exp27 build on 2026-08-13 — 0.22 s/case at 8 processes, so the full 3,089-case
+5ch cache is **~114 GB in ~12 minutes**).
+
+Per-case size scales almost exactly with channel count — 29 → 37 MB is ×1.28 against channels
+×1.25 — and synthetic cases are only ~6% larger than real ones (33.7 vs 31.8 MB for the data
+array). So the earlier ~91 GB total was not a per-case error: it came from the **~34 GB**
+estimate for the synthetic cache addition carried over from `exp27_commands.txt`. At 1,468
+synthetic cases × 37 MB the real figure is ~54 GB. The nnU-Net native figure remains an
+estimate.
+
+Note the transient tarball line assumes the section-4 pull loop that deletes each tar right
+after its own extract; downloading all three first needs 88 GB instead of 43 GB.
 
 Network volume storage bills continuously whether or not a pod is attached — that is the
 point (it saves the ~$10.50 GCS egress on every re-rent) but budget for it and delete the
@@ -669,6 +678,128 @@ is already running a native 11G 5-fold on Dataset102 (task `nnunet_11g`, folds 0
 `nnunet_data\run_11g_*.log`). If that has finished, this run duplicates it, and the slot is
 better spent on Option 2 below. Either way, do not block exp20–27 on it.
 
+### Install gcloud and pull the data (start this first — it runs for a while)
+
+The native run needs **only the two real datasets**, not `synthetic_regaug` — that is
+registration augmentation for exp27, a replica experiment. Skipping it drops the pull from
+88 GB to 49 GB and the egress from ~$10.50 to ~$5.90.
+
+```bash
+# 1. gcloud SDK
+curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts --install-dir=$HOME
+export PATH="$HOME/google-cloud-sdk/bin:$PATH"
+echo 'export PATH="$HOME/google-cloud-sdk/bin:$PATH"' >> ~/.bashrc
+gcloud --version
+
+# 2. Auth. A read-only service-account key is preferable on a rented box (see
+#    gcs_download_commands.txt §1); --no-launch-browser works on a headless pod if you
+#    accept putting your own credentials there.
+gcloud auth login --no-launch-browser
+#    or:  gcloud auth activate-service-account --key-file=/root/key.json
+gcloud config set project <your-project>
+
+# 3. Pull + extract, detached, deleting each tar as soon as it is unpacked.
+export BUCKET=gs://<your-bucket>
+export DEST=/workspace/Brats-MRI-Segmentation-For-BrainTumor    # the clone's root
+mkdir -p "$DEST/tar"
+nohup bash -c '
+  for f in training_data1_v2 training_data_additional; do
+    echo "=== $f downloading $(date -Is) ==="
+    gcloud storage cp "$BUCKET/tar/$f.tar" "$DEST/tar/" &&
+    tar -xf "$DEST/tar/$f.tar" -C "$DEST" &&
+    rm -f "$DEST/tar/$f.tar"
+  done; echo "=== done $(date -Is) ==="' > /workspace/pull.log 2>&1 &
+
+tail -f /workspace/pull.log
+```
+
+`-C "$DEST"`, not `-C "$DEST/Brats2024"` — tar members already carry the `Brats2024/`
+prefix, so extracting into the clone root produces
+`…/Brats-MRI-Segmentation-For-BrainTumor/Brats2024/…`, which is exactly where the configs
+expect it. Verify:
+
+```bash
+find "$DEST/Brats2024/training_data1_v2"        -name '*.nii.gz' | wc -l   # 8100
+find "$DEST/Brats2024/training_data_additional" -name '*.nii.gz' | wc -l   # 1626
+ls -d "$DEST/Brats2024"/training_data1_v2/BraTS-* | wc -l                  # 1350 cases
+```
+
+Each case holds 6 files including `-sub.nii.gz`; the native 4-channel run ignores that one.
+While this downloads, do the pip install below in a second shell.
+
+### Install — native path only
+
+The native run needs far less than `requirements.txt`. Do **not** run
+`pip install -r requirements.txt` for this: it pulls `monai[all]` (large) and `antspyx`
+(heavy, fragile `import ants`, only needed to *generate* synthetic data), and it lists
+`torch>=2.1.0`, which risks a resolver detour replacing the template's CUDA build.
+
+```bash
+cd /workspace
+git clone https://github.com/ZainAli26/Brats-MRI-Segmentation-For-BrainTumor.git
+cd Brats-MRI-Segmentation-For-BrainTumor/brats-segmentation
+
+pip install "nnunetv2>=2.5" monai rich pyyaml
+```
+
+That is the whole list. `nnunetv2` transitively brings SimpleITK, nibabel, scipy, pandas,
+scikit-image, scikit-learn, matplotlib, seaborn, blosc2, batchgenerators and
+dynamic-network-architectures. **`monai` (core, not `[all]`) is required** — the evaluation
+scripts import `monai.metrics`, `monai.transforms` and `monai.inferers` via
+`src/evaluation/metrics.py` and `src/evaluation/visualization.py`, and those imports happen at
+module load even when you pass `--no_visualize`.
+
+Then verify, in this order — each line answers a question that costs days if wrong:
+
+```bash
+# 1. Did pip leave the template's CUDA torch alone, and does it have Blackwell kernels?
+#    torch.cuda.is_available() returns True even when sm_120 kernels are missing, so run a
+#    real convolution.
+python -c "
+import torch
+print('torch', torch.__version__, 'cuda', torch.version.cuda,
+      'capability', torch.cuda.get_device_capability())
+c = torch.nn.Conv3d(4,32,3,padding=1).cuda()
+print('conv ok:', tuple(c(torch.randn(1,4,64,64,64, device='cuda')).shape))"
+#    Expect a +cu128 build and capability (12, 0) on a 5090.
+
+# 2. Which nnU-Net, and do the ResEnc M/L/XL planners exist?
+python -c "
+import importlib.metadata as m
+print('nnunetv2', m.version('nnunetv2'))
+from nnunetv2.experiment_planning.experiment_planners import resencUNet_planner as r
+print('planners:', [n for n in dir(r) if 'Planner' in n])"
+#    Need nnUNetPlannerResEncM for the commands below. If you only see
+#    ResEncUNetPlanner, you are on 2.1 — substitute -pl ResEncUNetPlanner throughout.
+
+# 3. Which augmentation backend? THIS decides whether a fold takes ~25 h or ~71 h.
+python -c "
+try:
+    import batchgeneratorsv2; print('batchgeneratorsv2 present — torch-based, faster')
+except ImportError:
+    print('batchgenerators only — numpy/scipy, expect the slower end of the estimate')"
+
+# 4. Dataloader shared memory. nnU-Net's workers need it as much as the replica's.
+df -h /dev/shm            # must be >= 8G; remount if it is 64M (see section 3)
+```
+
+Set the three nnU-Net path variables so they survive reconnects:
+
+```bash
+cat >> ~/.bashrc <<'EOF'
+export nnUNet_raw=/app/nnunet_data/nnUNet_raw
+export nnUNet_preprocessed=/app/nnunet_data/nnUNet_preprocessed
+export nnUNet_results=/app/nnunet_data/nnUNet_results
+export nnUNet_n_proc_DA=13
+EOF
+source ~/.bashrc
+```
+
+Under Path B there is no `/app`, so create the symlink from §4
+(`ln -s /workspace/.../brats-segmentation /app`) or point these at the real directory
+instead. `nnUNet_results` must land on the **network volume** — those are the only
+irreplaceable outputs here.
+
 ### Option 1 — match the replica's 11 GB plan (the comparable run)
 
 Same plan as exp20, so native fold 0 and exp20 fold 0 are directly comparable.
@@ -704,10 +835,14 @@ export nnUNet_results=/app/nnunet_data/nnUNet_results
 # 1. Pool both real dirs into one tree. convert_to_nnunet.py takes a SINGLE --data_dir,
 #    but the replica trains on the pooled 1621 cases — parity needs the same pool.
 #    (The Windows box does this with directory junctions; symlinks are the Linux equivalent.)
-mkdir -p ../Brats2024/training_all
-ln -sfn ../training_data1_v2/*        ../Brats2024/training_all/
-ln -sfn ../training_data_additional/* ../Brats2024/training_all/
-ls ../Brats2024/training_all | wc -l          # expect 1621
+#    ABSOLUTE targets: a relative glob is evaluated from the CWD, not from the link
+#    directory, so `ln -sfn ../training_data1_v2/* ...` silently creates one broken link
+#    named `*` instead of 1621 good ones.
+D=$(cd ../Brats2024 && pwd)
+mkdir -p "$D/training_all"
+ln -sfn "$D"/training_data1_v2/* "$D"/training_data_additional/* "$D/training_all/"
+ls "$D/training_all" | wc -l                  # expect 1621 — if it says 1, see the note above
+readlink -f "$D/training_all/$(ls "$D/training_all" | head -1)"   # must resolve to a real dir
 
 # 2. Convert BraTS -> nnU-Net, holding out the seed-42 test patients into imagesTs
 python nnunet_native/convert_to_nnunet.py \
