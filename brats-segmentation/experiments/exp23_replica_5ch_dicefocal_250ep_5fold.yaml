@@ -1,0 +1,116 @@
+# =============================================================================
+# Exp 23 @ 250 epochs - Replica + 5-channel subtraction + Dice-Focal, 5-fold CV
+# =============================================================================
+#
+# DERIVED FILE - `exp23_replica_5ch_dicefocal_5fold.yaml` with the epoch budget cut from
+# 1000 to 250. The parent config is unchanged and still defines the full-budget run.
+# EXACTLY TWO LINES DIFFER FROM THE PARENT: num_epochs, and model.name.
+#
+# WHY IT EXISTS
+#   This is the 5-channel arm (not part of the exp20-vs-exp22 loss comparison) of the exp20-vs-exp22 LOSS comparison. exp20 and exp22 already
+#   differ in nothing but the loss, but exp20 is defined at 1000 epochs, which is ~15
+#   days per fold on the local 8 GB box. Cutting BOTH arms to 250 with the identical
+#   transform keeps the pair's only free variable the loss function, while making the
+#   comparison affordable. The poly LR anneals fully across the 250 epochs, so each run
+#   is a complete training, not a truncated one.
+#
+#   Deliberately NOT exp26. exp26 is also exp20 at 250 epochs, but it is its own
+#   experiment about budget and sets save_every: 25 against exp22's 50. Deriving the arms
+#   here keeps save_every and every other knob identical across the pair.
+#
+# READ THESE NUMBERS ONLY AGAINST OTHER 250-EPOCH RUNS.
+#
+# CACHE / RUN - via Docker, so both arms share one environment (torch 2.4.1+cu124).
+#   preprocessed_dir is the parent's /app/.cache/replica/... container path; the host
+#   cache is bind-mounted there by REPLICA_CACHE.
+#
+#   export REPLICA_CACHE=/home/zain/brats_replica_cache
+#   REPLICA_CONFIG=exp23_replica_5ch_dicefocal_250ep_5fold.yaml \
+#   REPLICA_FOLD=0 REPLICA_ARGS="--num_workers 14" \
+#     docker-compose run --rm replica-train
+#
+#   Resume after any interruption (power cut included): same command, service
+#   replica-train-resume. It restores optimizer, GradScaler, EMA and history.
+# =============================================================================
+data:
+  dataset: "brats2024"
+  train_dir: "../Brats2024/training_data1_v2"
+  extra_train_dirs:
+    - "../Brats2024/training_data_additional"
+  val_dir: "../Brats2024/validation_data"
+  # ---- THE ONLY CHANGE vs exp20 ------------------------------------------------
+  modalities: ["t1c", "t1n", "t2f", "t2w", "sub"]
+  # ------------------------------------------------------------------------------
+  num_classes: 5
+  label_map: {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
+  inverse_label_map: {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
+  class_names: {1: "NETC", 2: "SNFH", 3: "ET", 4: "RC"}
+  split_seed: 42
+  split_ratios: [0.75, 0.15, 0.10]
+  n_folds: 5
+  kfold_holdout_test: true
+
+replica:
+  plans_json: "plans/nnUNetResEncM_11GBPlans.json"
+  configuration: "3d_fullres"
+  preprocessed_dir: "/app/.cache/replica/Dataset102_5ch"   # distinct: 5-channel arrays
+  store_dtype: "float16"
+
+  num_epochs: 250            # DERIVED: 1000 -> 250 (poly LR anneals fully)
+  num_iterations_per_epoch: 250
+  num_val_iterations_per_epoch: 50
+  initial_lr: 0.01
+  weight_decay: 0.00003
+  momentum: 0.99
+  nesterov: true
+  poly_exponent: 0.9
+  oversample_foreground_percent: 0.33
+  grad_clip: 12.0
+  amp: true
+  save_every: 50
+
+  loss: "dice_focal"        # exp22's loss change, on exp21's 5-channel input
+  focal_gamma: 2.0
+  dice_weight: 1.0
+  ce_weight: 1.0
+  deep_supervision: true
+  ds_zero_lowest: true
+  batch_dice: null
+
+  batch_size: null
+  grad_accum_steps: 1
+  grad_checkpointing: true   # the extra channel adds ~0.2 GB; still fits 8 GB
+  patch_size: null
+
+  num_workers: 12
+  seed: 42
+  validate_with_full_images: true
+  tile_step_size: 0.5
+  use_mirroring: true
+
+inference:
+  mode: "gaussian"
+  tta: true
+  overlap: 0.5
+  postprocess: false
+
+evaluation:
+  metrics: ["dice", "hausdorff95"]
+  regions:
+    ET: [3]
+    TC: [1, 3]
+    WT: [1, 2, 3]
+    RC: [4]
+  failure_dice_threshold: 0.5
+  small_tumor_volume_threshold: 500
+  num_failure_cases: 10
+
+model:
+  name: "nnunet_replica_resenc_m_11g_5ch_dicefocal_250ep"
+  in_channels: 5
+  out_channels: 5
+
+experiment:
+  output_dir: "./runs"
+  save_best_only: true
+  log_interval: 10
