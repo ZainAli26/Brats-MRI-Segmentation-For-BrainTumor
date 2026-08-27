@@ -111,7 +111,13 @@ replica:
   oversample_foreground_percent: 0.33
   grad_clip: 12.0
   amp: true
-  save_every: 50
+  # 10, not nnU-Net's 50: `--c` resumes from checkpoint_latest.pth ONLY, and that file is
+  # written every save_every epochs. At the measured 482 s/epoch for this 5-channel config,
+  # 50 epochs means a 6.7 h window in which a crash loses everything since the last save —
+  # and if the crash lands before epoch 50 there is no latest at all, so `--c` silently
+  # starts a fresh 4-day run. 10 epochs = ~80 min exposure for an 819 MB write.
+  # Affects crash resilience only, never the result.
+  save_every: 10
 
   loss: "dice_ce"
   dice_weight: 1.0
