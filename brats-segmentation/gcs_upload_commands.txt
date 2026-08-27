@@ -13,6 +13,10 @@ What needs to move (~88 GB, ~18.5k files):
   ../Brats2024/synthetic_regaug           39 GB    8,808 files    (exp27 only)
   ../Brats2024/training_data_additional  6.4 GB    1,626 files
 
+Uploaded later, separately (see section 1 option C):
+
+  ../Brats2024/validation_data           6.1 GB      940 files    official, unlabelled
+
 Use `gcloud storage`, not `gsutil`. It parallelizes by default and is several times
 faster; gsutil is in maintenance mode. Do not add `-m` — that is a gsutil flag.
 
@@ -62,6 +66,33 @@ tar -cf - ../Brats2024/synthetic_regaug         | gcloud storage cp - $BUCKET/ta
 No `-z`. The payload is already .nii.gz; gzip would burn CPU for ~0% gain.
 Caveat: a streamed upload cannot be resumed — a dropped connection restarts that tar.
 On a flaky link prefer option A.
+
+-------------------------------------------------------------------------------
+1. UPLOAD — option C: the OFFICIAL validation set  (added 2026-08-25)
+-------------------------------------------------------------------------------
+Uploaded separately from the training data because it is needed for a different job:
+producing portal submissions from a cloud box, not training. 188 cases / 940 files /
+6.1 GB, INPUTS ONLY — there is no ground truth for it anywhere, so it cannot be scored
+offline. Keep it mentally separate from the seed-42 held-out test set (153 cases WITH
+labels, carved out of the *training* data); see the README object below.
+
+gcloud storage rsync -r ../Brats2024/validation_data $BUCKET/Brats2024/validation_data
+
+rsync, not `cp -r`: 940 objects, so a re-run after an interruption skips what already
+matches instead of re-pushing 6.1 GB. Same prefix layout as the training dirs, so the
+box ends up with `Brats2024/validation_data` exactly where `val_dir:` in the experiment
+configs expects it.
+
+Two small metadata objects sit at the prefix root alongside the case dirs:
+  _README.md      what this set is, what it is not, and the `-sub` caveat
+  _case_list.txt  the 188 case ids
+`_collect_case_dirs()` matches on CASE_PATTERN, so these two are ignored by the loader
+after a pull.
+
+The `-sub.nii.gz` in each case dir is NOT from BraTS — it is the t1c-t1n subtraction
+channel precomputed locally by precompute_subtraction.py, shipped so a 5-channel model
+(exp23/exp26/exp27) can infer on the box without recomputing it. The 4 BraTS modalities
+are byte-identical to the release.
 
 -------------------------------------------------------------------------------
 2. VERIFY
@@ -123,7 +154,8 @@ gcloud storage buckets update $BUCKET --lifecycle-file=/tmp/lifecycle.json
 -------------------------------------------------------------------------------
 5. NOT UPLOADED, ON PURPOSE
 -------------------------------------------------------------------------------
-../Brats2024/validation_data  (6.1 GB)  inputs only, no ground truth — scored by the
-                                        official portal, useless for cloud training
-../Brats2023, ../MICCAI_BraTS_2019_Data_Training, *.zip   not used by the exp20-27 matrix
+../Brats2023/...ValidationData  (2.3 GB, 219 cases)   different challenge (pre-treatment
+                                        GLI, 4-class labels); the exp20-27 matrix is BraTS
+                                        2024 post-treatment, so this set is not comparable
+../MICCAI_BraTS_2019_Data_Training, *.zip                 not used by the exp20-27 matrix
 Local preprocessing cache               regenerate on the box; do not pay to move it

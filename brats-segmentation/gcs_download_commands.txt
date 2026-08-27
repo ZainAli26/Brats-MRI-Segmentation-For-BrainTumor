@@ -9,6 +9,12 @@ Bucket state as of 2026-08-13 (project <your-project>):
                                                           -------
                                                           87.7 GiB
 
+  gs://<your-bucket>/Brats2024/validation_data/         6.1 GiB     940 files   (added
+      2026-08-25) The OFFICIAL BraTS 2024 post-treatment validation set — 188 cases,
+      INPUTS ONLY, no ground truth exists for it. Stored as a directory (one object per
+      NIfTI), not a tar, so you can pull it on its own. Only needed if you are producing
+      portal submissions from the box; skip it for training. See section 2C.
+
   gs://<your-bucket>/Brats2024/...  IGNORE. Option A (directory copy) was aborted;
   only 5 objects / ~230 KB landed there. The tarballs are the complete copy.
 
@@ -52,15 +58,24 @@ pull (`shred -u /root/key.json`) and revoke when the box is returned:
   gcloud iam service-accounts keys list --iam-account=brats-puller@<your-project>.iam.gserviceaccount.com
   gcloud iam service-accounts keys delete <KEY_ID> --iam-account=brats-puller@<your-project>.iam.gserviceaccount.com
 
-No-gcloud fallback (token valid ~1 h, minted locally, no key file on the box):
+Short-lived token instead of a key file (valid ~1 h, minted locally, nothing persistent on
+the box). gcloud itself will use a bare token straight from the environment:
   # local:
   gcloud auth print-access-token
   # on the box:
+  export CLOUDSDK_AUTH_ACCESS_TOKEN=<paste>
+  gcloud storage ls $BUCKET/tar/          # no `gcloud auth` step needed at all
+
+Or with no gcloud on the box:
   export TOK=<paste>
   curl -H "Authorization: Bearer $TOK" \
     "https://storage.googleapis.com/storage/v1/b/<your-bucket>/o/tar%2Ftraining_data1_v2.tar?alt=media" \
     | tar -xf - -C /workspace
   (the object name must be URL-encoded: tar/x.tar -> tar%2Fx.tar)
+
+A token does NOT refresh, so it is the wrong tool for the 49-88 GB pull — it expires
+mid-transfer and you get a 401. Use it for quick checks (ls, du, verifying access) and use
+the service-account key or `gcloud auth login` for the actual download; both auto-refresh.
 
 -------------------------------------------------------------------------------
 2. PULL — option A: download to disk, then extract  (RECOMMENDED)
@@ -102,6 +117,32 @@ gcloud storage cat $BUCKET/tar/synthetic_regaug.tar         | tar -xf - -C $DEST
 
 With a progress bar (apt-get install -y pv):
   gcloud storage cat $BUCKET/tar/training_data1_v2.tar | pv -s 45752504320 | tar -xf - -C $DEST
+
+-------------------------------------------------------------------------------
+2. PULL — option C: just the official validation set  (188 cases, 6.1 GB)
+-------------------------------------------------------------------------------
+Independent of the training pull; it is a directory, not a tar, so rsync it straight into
+the layout the configs expect (`val_dir: ../Brats2024/validation_data`):
+
+  gcloud storage rsync -r $BUCKET/Brats2024/validation_data /workspace/Brats2024/validation_data
+
+Re-runnable — rsync skips what already matches on size+mtime, so an interrupted pull just
+resumes. ~$0.75 of egress off GCP, free to a GCP VM in us-central1.
+
+There is NO ground truth for these 188 cases, here or locally. Predictions on this set
+can only be scored by uploading them to the BraTS portal. To score offline you want the
+seed-42 held-out test set instead — 153 cases WITH labels, carved out of the *training*
+data, so it comes down inside training_data1_v2.tar + training_data_additional.tar
+(ids: $BUCKET/native_11g_750ep/dataset_manifest/test_cases.txt).
+
+Each case dir holds 5 files, not 6: -t1c -t1n -t2f -t2w -sub, and no -seg. The -sub is
+the locally precomputed T1Gd-T1 subtraction channel for the 5-channel experiments; the
+4 BraTS modalities are byte-identical to the release.
+
+Verify:
+  ls /workspace/Brats2024/validation_data | grep -c '^BraTS-GLI'                  # expect 188
+  find /workspace/Brats2024/validation_data -name '*.nii.gz' | wc -l              # expect 940
+  find /workspace/Brats2024/validation_data -name '*seg*' | wc -l                 # expect 0
 
 -------------------------------------------------------------------------------
 3. RUN IT DETACHED — the pull outlives the ssh session
